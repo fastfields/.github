@@ -31,7 +31,7 @@ C++/CUDA sources
    │  │                         # * data and pointer types are templated
    │  │                         # * sizes are dynamically defined
    |  |
-   │  └─ fastfields-cpu-lib  ─┐ # Header + source files that end up in "fastfields-cpu.{so|dylib|dll}"
+   │  └─ fastfields-cpu-lib  ─┐ # Header + source files that end up in "fastfields-cpu.{ext}"
    │                          │ # * all functions are exported
    │                          │ # * inputs are dlpack tensors with CPU memory (no template)
    │                          │ # * dispatches dlpack dtype to correct template implementation
@@ -44,13 +44,13 @@ C++/CUDA sources
       │                       │ # * data and pointer types are templated
       │                       │ # * sizes are dynamically defined
       │                       │
-      └─ fastfields-cuda-lib ─┤ # Header + source files that end up in "fastfields-cuda.{so|dylib|dll}"
+      └─ fastfields-cuda-lib ─┤ # Header + source files that end up in "fastfields-cuda.{ext}"
                               │ # * all functions are exported
                               │ # * inputs are dlpack tensors with CUDA memory(no template)
                               │ # * dispatches dlpack dtype to correct template implementation
                               │ # * compiled by nvcc
                               │
-                              └ fastfields-lib   # Header + souce files that end up in "fastfields.{so|dylib|dll}"
+                              └ fastfields-lib   # Header + souce files that end up in "fastfields.{ext}"
                                                  # * all functions are exported
                                                  # * inputs are dlpack tensors (no template)
                                                  # * dispatches dlpack device to correct lib (cpu or cuda)
