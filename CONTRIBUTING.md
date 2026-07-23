@@ -212,4 +212,78 @@ cleverness.**
 
 ---
 
+## Python packaging, CI & docs
+
+The Python repos follow the conventions of the **bagofseeds** packages
+(`bagof-*`, `fiery-*`) — study one (e.g. `bagof-magic`) before adding a repo.
+
+### pyproject
+
+- **PEP 420 native namespace.** No repo ships `fastfields/__init__.py`; each
+  ships only its `fastfields/<sub>/` subpackage with
+  `[tool.setuptools.packages.find] namespaces = true` so the distributions
+  merge into one `fastfields` import root.
+- **Dynamic version via `versioningit`** (`dynamic = ["version"]`; setuptools +
+  versioningit + wheel build backend). The version comes from git tags; a
+  `_version.py` is written into the package and git-ignored. `default-tag` keeps
+  a tag-less checkout building.
+- **Rich `[project]` metadata**: `authors`/`maintainers`, `keywords`,
+  trove `classifiers` (incl. `License :: OSI Approved :: MIT License`, the
+  supported `Programming Language :: Python :: 3.x`, `Typing :: Typed`), and a
+  `[project.urls]` block (Homepage / Documentation / Issues / Repository).
+- **Tooling config lives in pyproject**: `ruff` (`line-length = 79`,
+  `select = ["B","E","F","I","W"]`, `format.quote-style = "preserve"`),
+  `codespell`, `coverage` (`omit` the generated `_version.py`), and
+  `[tool.pytest.ini_options] testpaths = ["tests"]`.
+
+### Workflows
+
+Each repo carries **thin, self-contained** workflows under `.github/workflows/`
+(bagofseeds factors the real steps into a central `bagofseeds/actions` repo and
+keeps one-line callers per package; we inline the steps for now — extract a
+`fastfields/actions` repo later if the duplication bites):
+
+- `lint.yaml` — `ruff check`, `ruff format --check`, `codespell` (push + PR).
+- `test.yaml` — a Python-version matrix: checkout `submodules: recursive`,
+  install the package `.[test]`, run `pytest` from a neutral cwd. Path-filter on
+  `fastfields/**`, `tests/**`, `pyproject.toml`. Wrapper repos need
+  `fastfields-dlpack`; until it is on PyPI / the wheel index they build it from
+  the sibling repo.
+- `docs.yaml` — build the site and deploy to Pages (`permissions: pages: write,
+  id-token: write`, `concurrency: {group: pages}`).
+- C++ repos get a `test.yaml` too: the **cpu-lib** one (`make test
+  CXX=clang++`) is the real gate; **cuda-lib** installs the CUDA toolkit and
+  runs the nvcc **compile+link** gate (no GPU).
+
+Trigger on push to `main` + `pull_request`; **enable Pages with the "GitHub
+Actions" source** once per repo (Settings → Pages) or `deploy-pages` fails.
+
+### Docs
+
+- **[zensical]** (a mkdocs-material successor) configured in `zensical.toml`,
+  with the `mkdocstrings` python handler set to `docstring_style = "numpy"` so
+  the API pages render from the same NumPy-style docstrings the code already
+  carries. `docs/` holds `index.md`, `api/`, and `requirements.txt`.
+- Each package publishes to `https://fastfields.github.io/<repo>/`; the C++
+  `fastfields-lib` publishes a prose/architecture site (no mkdocstrings). The
+  aggregated user guide for `fastfields.any` is published to
+  `https://fastfields.github.io/docs/` from a dedicated `fastfields/docs` repo.
+
+### Wheel distribution
+
+Follow **PyTorch's model**, served from the `fastfields/whl` repo
+(<https://fastfields.github.io/whl/>):
+
+- The compute backend is the wheel's **local version label**
+  (`…+cpu`, `…+cu124`); the index has one PEP 503 folder per backend
+  (`cpu/`, `cu118/`, `cu124/`), installed with `--extra-index-url`.
+- **PyPI** ships the broad default — a CUDA wheel (`cu124`) on Linux/Windows, a
+  CPU wheel on macOS; the index additionally offers CPU and other CUDA lines.
+- CUDA wheels are **fat** (multi-`sm_*` SASS + forward-compatible PTX) to run on
+  as many GPUs as possible, trading binary size and build time for coverage.
+
+[zensical]: https://github.com/mkdocs/zensical
+
+---
+
 Thanks for keeping fastfields fast.
