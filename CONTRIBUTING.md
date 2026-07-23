@@ -266,8 +266,10 @@ Actions" source** once per repo (Settings → Pages) or `deploy-pages` fails.
   carries. `docs/` holds `index.md`, `api/`, and `requirements.txt`.
 - Each package publishes to `https://fastfields.github.io/<repo>/`; the C++
   `fastfields-lib` publishes a prose/architecture site (no mkdocstrings). The
-  aggregated user guide for `fastfields.any` is published to
-  `https://fastfields.github.io/docs/` from a dedicated `fastfields/docs` repo.
+  org **landing page** at `https://fastfields.github.io/` (the
+  `fastfields/fastfields.github.io` repo) introduces the project and links out
+  to each package's API site and to the wheel index; every package's nav links
+  back to it.
 
 ### Wheel distribution
 
