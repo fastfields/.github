@@ -2,6 +2,9 @@
 
 Fast tools for dense scalar and vector fields (implemented in C++/CUDA).
 
+> [!WARNING]
+> Under development and highly unstable! Do not use yet.
+
 ### Project hierarchy
 
 C++/CUDA sources
