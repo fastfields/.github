@@ -32,6 +32,13 @@ on:
 permissions:
   contents: read
 
+# Cancel superseded runs on the same ref. The group is keyed on the *calling*
+# repo (github.repository resolves to the caller) so runs in different repos
+# never cancel each other -- only a newer push to the same PR/branch does.
+concurrency:
+  group: ${{ github.repository }}-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   pytest:
     runs-on: ${{ matrix.os }}
@@ -55,6 +62,10 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
+          # Cache the pip download/wheel dir, keyed on the resolved deps in
+          # pyproject.toml, so repeat installs of numpy/torch/... are fast.
+          cache: "pip"
+          cache-dependency-path: pyproject.toml
       - name: Install build toolchain (Linux)
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y clang

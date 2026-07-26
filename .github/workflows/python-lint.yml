@@ -25,6 +25,12 @@ on:
 permissions:
   contents: read
 
+# Cancel superseded runs on the same ref (keyed on the calling repo so repos
+# never cancel each other).
+concurrency:
+  group: ${{ github.repository }}-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   ruff:
     runs-on: ubuntu-latest
