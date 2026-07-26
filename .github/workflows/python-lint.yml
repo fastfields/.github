@@ -1,0 +1,39 @@
+name: Lint
+
+# Reusable lint workflow shared by the fastfields Python packages
+# (numpy / torch / cupy / bind-py / any). Call it from a repo with:
+#
+#   jobs:
+#     ruff:
+#       uses: fastfields/.github/.github/workflows/python-lint.yml@main
+#
+# The tool versions are pinned here so every package lints identically; bump
+# them in one place.
+
+on:
+  workflow_call:
+    inputs:
+      ruff-version:
+        description: "Pinned ruff version"
+        type: string
+        default: "0.15.8"
+      codespell-version:
+        description: "Pinned codespell version"
+        type: string
+        default: "2.4.3"
+
+permissions:
+  contents: read
+
+jobs:
+  ruff:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+      - run: pip install "ruff==${{ inputs.ruff-version }}" "codespell==${{ inputs.codespell-version }}"
+      - run: ruff check .
+      - run: ruff format --check .
+      - run: codespell

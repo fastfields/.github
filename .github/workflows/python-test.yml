@@ -1,0 +1,82 @@
+name: Test
+
+# Reusable test workflow shared by the fastfields Python packages
+# (numpy / torch / cupy / bind-py / any). Call it from a repo with:
+#
+#   jobs:
+#     pytest:
+#       uses: fastfields/.github/.github/workflows/python-test.yml@main
+#       secrets: inherit
+#
+# `secrets: inherit` lets the checkout pick up CI_SUBMODULE_TOKEN where a repo
+# defines it (fastfields-bind-py needs it for its C++ submodule chain); repos
+# without that secret fall back to the default token, which is fine for a
+# pure-Python checkout.
+#
+# The fastfields-dlpack install step is skipped automatically for
+# fastfields-bind-py, which *is* the dlpack package -- the guard keys off the
+# calling repo's name, so no per-repo input is needed.
+
+on:
+  workflow_call:
+    inputs:
+      os:
+        description: "JSON array of runner OSes for the matrix"
+        type: string
+        default: '["ubuntu-latest", "macos-latest"]'
+      python-versions:
+        description: "JSON array of Python versions for the matrix"
+        type: string
+        default: '["3.9", "3.11", "3.12"]'
+
+permissions:
+  contents: read
+
+jobs:
+  pytest:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: ${{ fromJSON(inputs.os) }}
+        python-version: ${{ fromJSON(inputs.python-versions) }}
+    # The C++ build that fastfields-dlpack needs is driven by clang++ on every
+    # OS; the per-OS steps below make sure a clang++ is on PATH.
+    env:
+      CXX: clang++
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          submodules: recursive
+          token: ${{ secrets.CI_SUBMODULE_TOKEN }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install build toolchain (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y clang
+      - name: Install build toolchain (macOS)
+        if: runner.os == 'macOS'
+        # clang++ ships with the Xcode Command Line Tools, already present on
+        # the macOS runners, so there is nothing to install here.
+        run: clang++ --version
+      - name: Install build toolchain (Windows)
+        if: runner.os == 'Windows'
+        # NOTE: the Windows leg may be RED depending on the package. The C++
+        # build uses clang-style Makefiles; LLVM provides clang++ and make
+        # drives them. Kept visible (not hidden) so the gap stays tracked.
+        run: choco install -y llvm make
+      # TODO: the git+ install of fastfields-dlpack below does NOT fetch its
+      # submodules, so this cross-repo source build is fragile and will likely
+      # need a live-CI iteration (or installing from a wheel index once one
+      # exists). For fastfields-bind-py this step is skipped (it IS dlpack).
+      - name: Install fastfields-dlpack from source
+        if: ${{ github.event.repository.name != 'fastfields-bind-py' }}
+        run: pip install "fastfields-dlpack @ git+https://github.com/fastfields/fastfields-bind-py@main"
+      - name: Install package + test deps
+        run: pip install ".[test]"
+      - name: Run pytest
+        run: cd /tmp && python -m pytest ${{ github.workspace }}/tests -q
