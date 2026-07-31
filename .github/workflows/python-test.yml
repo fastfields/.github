@@ -9,13 +9,13 @@ name: Test
 #       secrets: inherit
 #
 # `secrets: inherit` lets the checkout pick up CI_SUBMODULE_TOKEN where a repo
-# defines it (fastfields-bind-py needs it for its C++ submodule chain); repos
+# defines it (fastfields-dlpack needs it for its C++ submodule chain); repos
 # without that secret fall back to the default token, which is fine for a
 # pure-Python checkout.
 #
 # The fastfields-dlpack install step is skipped automatically for
-# fastfields-bind-py, which *is* the dlpack package -- the guard keys off the
-# calling repo's name, so no per-repo input is needed.
+# fastfields-dlpack itself, which *is* the dlpack package -- the guard keys off
+# the calling repo's name, so no per-repo input is needed.
 
 on:
   workflow_call:
@@ -59,6 +59,10 @@ jobs:
         with:
           submodules: recursive
           token: ${{ secrets.CI_SUBMODULE_TOKEN }}
+          # versioningit derives the version from `git describe`, which needs
+          # the tags -- a shallow (depth 1) checkout hides them and the version
+          # silently falls back to "0+unknown".
+          fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
@@ -80,13 +84,16 @@ jobs:
         # build uses clang-style Makefiles; LLVM provides clang++ and make
         # drives them. Kept visible (not hidden) so the gap stays tracked.
         run: choco install -y llvm make
-      # TODO: the git+ install of fastfields-dlpack below does NOT fetch its
-      # submodules, so this cross-repo source build is fragile and will likely
-      # need a live-CI iteration (or installing from a wheel index once one
-      # exists). For fastfields-bind-py this step is skipped (it IS dlpack).
+      # pip *does* run `git submodule update --init --recursive` for a git+
+      # install, so this cross-repo source build works as long as the pinned
+      # submodule chain on fastfields-dlpack@main is healthy. Once the wheel
+      # index carries a release, prefer installing from there instead.
+      # For fastfields-dlpack itself this step is skipped (it IS dlpack); the
+      # guard uses `github.repository`, which in a reusable workflow resolves
+      # to the *calling* repo.
       - name: Install fastfields-dlpack from source
-        if: ${{ github.event.repository.name != 'fastfields-bind-py' }}
-        run: pip install "fastfields-dlpack @ git+https://github.com/fastfields/fastfields-bind-py@main"
+        if: ${{ github.repository != 'fastfields/fastfields-dlpack' }}
+        run: pip install "fastfields-dlpack @ git+https://github.com/fastfields/fastfields-dlpack@main"
       - name: Install package + test deps
         run: pip install ".[test]"
       - name: Run pytest
