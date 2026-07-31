@@ -212,12 +212,24 @@ jobs:
           path: dist
           merge-multiple: true
 
-      # Guard rail: catch a shallow checkout / missing tag before it reaches
-      # the index. Wheel file names are <name>-<version>-<pytag>-...whl, and
-      # the version must be the tag, optionally plus a +<backend> label.
+      # Guard rail. The built version must equal the release tag *exactly*,
+      # including the local label -- not merely start with it. Two distinct
+      # failure modes are silent without this:
+      #
+      #   * a shallow checkout or unreachable tag degrades versioningit to
+      #     "0+unknown", which still produces a perfectly valid-looking wheel;
+      #   * a build that is tagged but not clean yields e.g.
+      #     "0.0.0.dev1+cpu.4.gdeadbee". generate.py buckets on the *whole*
+      #     local segment (`backend = local or "cpu"`), so that wheel would be
+      #     filed under a phantom "cpu.4.gdeadbee" backend and never appear in
+      #     cpu/ -- an index that looks fine and resolves to nothing.
+      #
+      # Comparing the full version catches both.
       - name: Assert the built version matches the release tag
         env:
           TAG: ${{ inputs.tag }}
+          COMPILED: ${{ inputs.compiled }}
+          BACKEND: ${{ inputs.backend }}
         run: |
           set -euo pipefail
           shopt -s nullglob
@@ -225,20 +237,24 @@ jobs:
           if [ ${#wheels[@]} -eq 0 ]; then
             echo "::error::no wheels were produced"; exit 1
           fi
-          # PEP 427 escapes '-' in versions, so splitting on '-' is safe.
-          expected_base="${TAG#v}"
+          expected="${TAG#v}"
+          if [ "$COMPILED" = "true" ]; then
+            expected="${expected}+${BACKEND}"
+          fi
           rc=0
           for w in "${wheels[@]}"; do
+            # PEP 427 escapes '-' inside the version, so field 2 is the version.
             ver="$(basename "$w" | cut -d- -f2)"
-            base="${ver%%+*}"
-            if [ "$base" != "$expected_base" ]; then
-              echo "::error::$(basename "$w"): version '$ver' does not match" \
-                   "release tag '$TAG'. A '0+unknown' here means the checkout" \
-                   "was shallow or the tag was not reachable."
+            if [ "$ver" != "$expected" ]; then
+              echo "::error::$(basename "$w"): version '$ver' != expected" \
+                   "'$expected'. '0+unknown' means the checkout was shallow or" \
+                   "the tag unreachable; a trailing '.N.g<sha>' means the tree" \
+                   "was not clean at the tag, and the wheel index would file it" \
+                   "under a phantom backend."
               rc=1
             fi
           done
-          [ $rc -eq 0 ] && echo "all wheels report version $expected_base"
+          [ $rc -eq 0 ] && echo "all wheels report version $expected"
           exit $rc
 
       # generate.py reads a sibling <wheel>.sha256 release asset to emit the
