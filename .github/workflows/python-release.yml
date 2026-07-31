@@ -1,0 +1,267 @@
+name: Release
+
+# Reusable release workflow shared by the fastfields Python packages
+# (dlpack / numpy / torch / cupy / fastfields).
+#
+# ---------------------------------------------------------------------------
+# The shape of the pipeline
+# ---------------------------------------------------------------------------
+# Publishing is **release-driven**: a human drafts and publishes a GitHub
+# Release in the package repo, choosing the tag there (e.g. `0.0.0.dev1`) and
+# writing the notes. Everything downstream is automatic:
+#
+#   release: published  ->  build the wheel at that tag
+#                       ->  upload the wheel back onto that same release
+#                       ->  repository_dispatch fastfields/whl (index rebuild)
+#
+# So each package repo owns its own release: there is no central build, and no
+# poller on the index side. Callers wire it up with:
+#
+#   name: Release
+#   on:
+#     release:
+#       types: [published]
+#     workflow_dispatch:
+#       inputs:
+#         tag: { description: "Existing release tag to (re)build", type: string }
+#   permissions:
+#     contents: write
+#   jobs:
+#     release:
+#       uses: fastfields/.github/.github/workflows/python-release.yml@main
+#       with:
+#         tag: ${{ github.event.release.tag_name || inputs.tag }}
+#         compiled: false        # true only for fastfields-dlpack
+#       secrets: inherit
+#
+# The `workflow_dispatch` leg exists so a failed publish can be retried against
+# an already-published release without deleting and re-cutting it.
+#
+# ---------------------------------------------------------------------------
+# Versioning
+# ---------------------------------------------------------------------------
+# All five packages use `versioningit`, which derives the version from
+# `git describe`. Two things must hold, and this workflow enforces both:
+#
+#   * the checkout must NOT be shallow (`fetch-depth: 0`) or the tag is
+#     invisible and the version silently degrades to "0+unknown";
+#   * the build must happen at the release's tag, not at the branch head.
+#
+# The `publish` job additionally *asserts* that the version baked into the
+# built wheels matches the release tag, so a silent "0+unknown" fails the run
+# loudly instead of shipping a garbage version to the index.
+#
+# ---------------------------------------------------------------------------
+# Secrets (passed via `secrets: inherit`)
+# ---------------------------------------------------------------------------
+#   CI_SUBMODULE_TOKEN  - read access to the C++ submodule chain. Only
+#                         fastfields-dlpack needs it; elsewhere the checkout
+#                         falls back to the default token.
+#   WHL_DISPATCH_TOKEN  - fine-grained PAT with `contents: write` on
+#                         fastfields/whl. The default GITHUB_TOKEN is scoped to
+#                         the *calling* repo and cannot fire a workflow in
+#                         another repo, so cross-repo dispatch needs this. If
+#                         it is missing the dispatch is reported as a warning
+#                         and the index simply has to be rebuilt by hand.
+
+on:
+  workflow_call:
+    inputs:
+      tag:
+        description: "Release tag to build and upload to (e.g. 0.0.0.dev1)."
+        type: string
+        required: true
+      compiled:
+        description: >-
+          True for the package that ships compiled artifacts
+          (fastfields-dlpack). Pure-Python wrappers leave this false and get a
+          single universal py3-none-any wheel plus an sdist.
+        type: boolean
+        default: false
+      backend:
+        description: >-
+          Compute backend for a compiled build. Becomes the wheel's PEP 440
+          local version label (PyTorch convention), e.g. 0.0.0.dev1+cpu, which
+          is what the wheel index buckets on. Ignored when compiled is false.
+        type: string
+        default: cpu
+      runners:
+        description: >-
+          JSON array of runner OSes for a compiled build. Defaults to Linux
+          only: the C++ Makefiles are not yet Windows-portable, and the macOS
+          leg needs cross-arch work before it can be trusted.
+        type: string
+        default: '["ubuntu-latest"]'
+      cibw-build:
+        description: "CIBW_BUILD selector for a compiled build."
+        type: string
+        default: "cp39-* cp310-* cp311-* cp312-*"
+      dispatch-index:
+        description: "Ping fastfields/whl to regenerate the wheel index."
+        type: boolean
+        default: true
+
+permissions:
+  contents: write          # upload assets onto the release
+
+jobs:
+  # ------------------------------------------------------------ pure-Python
+  # One universal wheel + an sdist. No compiler, no matrix, no local version
+  # label: generate.py lists an unlabelled wheel in *every* backend folder.
+  build-pure:
+    if: ${{ !inputs.compiled }}
+    name: build (universal)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.tag }}
+          fetch-depth: 0            # versioningit needs the tag
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install build
+      - run: python -m build        # sdist + wheel into dist/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-universal
+          path: dist/*
+
+  # --------------------------------------------------------------- compiled
+  # cibuildwheel drives setup.py, which builds libfastfields{,-cpu} from the
+  # _fastfields_lib submodule and ships them inside the wheel.
+  build-compiled:
+    if: ${{ inputs.compiled }}
+    name: build (${{ inputs.backend }}, ${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: ${{ fromJSON(inputs.runners) }}
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.tag }}
+          submodules: recursive     # _fastfields_lib + its own submodules
+          token: ${{ secrets.CI_SUBMODULE_TOKEN }}
+          fetch-depth: 0            # versioningit needs the tag
+      - uses: pypa/cibuildwheel@v2.21
+        env:
+          CIBW_BUILD: ${{ inputs.cibw-build }}
+          CIBW_SKIP: "*-musllinux_* *_i686 *-win32"
+          CIBW_ENVIRONMENT: "CXX=clang++"
+          # `clang` for the C++ build; `git config --global safe.directory` so
+          # versioningit can run `git describe` against the bind-mounted,
+          # differently-owned /project tree inside the manylinux container --
+          # without it git refuses ("dubious ownership") and the version
+          # degrades to "0+unknown".
+          CIBW_BEFORE_ALL_LINUX: >-
+            (yum install -y clang || (apt-get update && apt-get install -y clang)) &&
+            git config --global --add safe.directory '*'
+          # Repair FIRST (so the wheel carries a manylinux tag and any
+          # third-party deps are vendored -- but not our own rpath'd libs),
+          # THEN stamp the +<backend> local version label. Doing it the other
+          # way round leaves the unrepaired linux_x86_64 wheel sitting in
+          # {dest_dir} next to the repaired one, and pip cannot install that.
+          # /tmp/ff-repaired is wiped each time because all Python versions
+          # share one container and would otherwise see each other's wheels.
+          CIBW_REPAIR_WHEEL_COMMAND_LINUX: >-
+            rm -rf /tmp/ff-repaired && mkdir -p /tmp/ff-repaired &&
+            auditwheel repair
+            --exclude libfastfields.so
+            --exclude libfastfields-cpu.so
+            --exclude libfastfields-cuda.so
+            -w /tmp/ff-repaired {wheel} &&
+            pip install -q wheel &&
+            python scripts/apply_local_version.py '/tmp/ff-repaired/*.whl'
+            {dest_dir} ${{ inputs.backend }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ inputs.backend }}-${{ matrix.os }}
+          path: wheelhouse/*.whl
+
+  # -------------------------------------------------------------- publish
+  publish:
+    name: publish to the release
+    needs: [build-pure, build-compiled]
+    # Exactly one of the two build jobs runs; `needs` on a skipped job resolves
+    # to 'skipped', so gate on "nothing actually failed" rather than success().
+    if: ${{ always() && !failure() && !cancelled() }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      # Guard rail: catch a shallow checkout / missing tag before it reaches
+      # the index. Wheel file names are <name>-<version>-<pytag>-...whl, and
+      # the version must be the tag, optionally plus a +<backend> label.
+      - name: Assert the built version matches the release tag
+        env:
+          TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          wheels=(dist/*.whl)
+          if [ ${#wheels[@]} -eq 0 ]; then
+            echo "::error::no wheels were produced"; exit 1
+          fi
+          # PEP 427 escapes '-' in versions, so splitting on '-' is safe.
+          expected_base="${TAG#v}"
+          rc=0
+          for w in "${wheels[@]}"; do
+            ver="$(basename "$w" | cut -d- -f2)"
+            base="${ver%%+*}"
+            if [ "$base" != "$expected_base" ]; then
+              echo "::error::$(basename "$w"): version '$ver' does not match" \
+                   "release tag '$TAG'. A '0+unknown' here means the checkout" \
+                   "was shallow or the tag was not reachable."
+              rc=1
+            fi
+          done
+          [ $rc -eq 0 ] && echo "all wheels report version $expected_base"
+          exit $rc
+
+      # generate.py reads a sibling <wheel>.sha256 release asset to emit the
+      # PEP 503 '#sha256=' fragment (the Releases API exposes no per-asset
+      # digest). Without these the index still works but warns and links
+      # unpinned artifacts.
+      - name: Generate sha256 sidecars
+        run: |
+          set -euo pipefail
+          cd dist
+          for f in *.whl *.tar.gz; do
+            [ -e "$f" ] || continue
+            sha256sum "$f" > "$f.sha256"
+          done
+          ls -l
+
+      - name: Upload artifacts onto the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ inputs.tag }}
+          GH_REPO: ${{ github.repository }}
+        # --clobber makes a retry (workflow_dispatch) idempotent.
+        run: gh release upload "$TAG" dist/* --clobber
+
+      # Push-trigger the index rebuild from here, rather than having the index
+      # poll for new assets.
+      - name: Ping the wheel index to rebuild
+        if: ${{ inputs.dispatch-index }}
+        env:
+          GH_TOKEN: ${{ secrets.WHL_DISPATCH_TOKEN }}
+        run: |
+          if [ -z "${GH_TOKEN:-}" ]; then
+            echo "::warning::WHL_DISPATCH_TOKEN is not set, so fastfields/whl" \
+                 "cannot be triggered from here (the default GITHUB_TOKEN is" \
+                 "scoped to this repo). Run the 'Build and deploy wheel index'" \
+                 "workflow in fastfields/whl by hand to pick these wheels up."
+            exit 0
+          fi
+          curl -fsS -X POST \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            https://api.github.com/repos/fastfields/whl/dispatches \
+            -d '{"event_type":"wheels-updated"}'
+          echo "dispatched wheels-updated to fastfields/whl"
