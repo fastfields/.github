@@ -154,6 +154,12 @@ jobs:
         env:
           CIBW_BUILD: ${{ inputs.cibw-build }}
           CIBW_SKIP: "*-musllinux_* *_i686 *-win32"
+          # AlmaLinux 8 rather than cibuildwheel's default CentOS 7 image: its
+          # system libstdc++ headers are GCC 8, which clang picks up without
+          # any --gcc-toolchain steering. (CentOS 7's are GCC 4.8, whose
+          # libstdc++ is patchy for C++11.) glibc 2.28+ is a fine floor for a
+          # project that has never shipped a wheel.
+          CIBW_MANYLINUX_X86_64_IMAGE: manylinux_2_28
           # FF_WHEEL_VARIANT is read by fastfields-dlpack's custom versioningit
           # hook, which stamps the backend into the PEP 440 local version
           # identifier at build time (0.0.0.dev1+cpu). Doing it in versioningit
@@ -161,13 +167,22 @@ jobs:
           # correct in METADATA, in RECORD and in the generated _version.py
           # from the outset, so nothing can drift out of sync.
           CIBW_ENVIRONMENT: "CXX=clang++ FF_WHEEL_VARIANT=${{ inputs.backend }}"
-          # `clang` for the C++ build; `git config --global safe.directory` so
-          # versioningit can run `git describe` against the bind-mounted,
-          # differently-owned /project tree inside the manylinux container --
-          # without it git refuses ("dubious ownership") and the version
-          # degrades to "0+unknown".
+          # `clang` for the C++ build -- and `gcc-c++` alongside it, which is
+          # NOT redundant: clang is only the compiler driver, it uses the
+          # system GCC's libstdc++ headers. Without gcc-c++ the manylinux image
+          # has no C++ standard library headers at all and the build dies on
+          # `fatal error: 'stdexcept' file not found` at the very first
+          # translation unit. (The Makefiles are clang-only -- they hard-code
+          # -ferror-limit / -ftemplate-backtrace-limit -- so building with g++
+          # instead is not an option here.)
+          #
+          # `git config --global safe.directory` so versioningit can run
+          # `git describe` against the bind-mounted, differently-owned /project
+          # tree inside the container -- without it git refuses ("dubious
+          # ownership") and the version degrades to "0+unknown".
           CIBW_BEFORE_ALL_LINUX: >-
-            (yum install -y clang || (apt-get update && apt-get install -y clang)) &&
+            (yum install -y clang gcc-c++ ||
+             (apt-get update && apt-get install -y clang g++)) &&
             git config --global --add safe.directory '*'
           # Vendor third-party deps and apply the manylinux tag, but leave our
           # own libfastfields* alone: the package already carries an
