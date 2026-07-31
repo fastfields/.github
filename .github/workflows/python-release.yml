@@ -80,9 +80,14 @@ on:
         default: false
       backend:
         description: >-
-          Compute backend for a compiled build. Becomes the wheel's PEP 440
-          local version label (PyTorch convention), e.g. 0.0.0.dev1+cpu, which
-          is what the wheel index buckets on. Ignored when compiled is false.
+          Compute backend for a compiled build. Exported as FF_WHEEL_VARIANT
+          and turned into the wheel's PEP 440 local version label (PyTorch
+          convention) by the package's versioningit hook, e.g.
+          0.0.0.dev1+cpu. Must match a wheel-index backend folder name
+          exactly -- cpu, cu118, cu126, cu128 -- because that label is what
+          generate.py buckets on. Ignored when compiled is false: the
+          pure-Python wrappers have no variant axis, and an unlabelled wheel
+          is deliberately listed in *every* backend folder.
         type: string
         default: cpu
       runners:
@@ -149,7 +154,13 @@ jobs:
         env:
           CIBW_BUILD: ${{ inputs.cibw-build }}
           CIBW_SKIP: "*-musllinux_* *_i686 *-win32"
-          CIBW_ENVIRONMENT: "CXX=clang++"
+          # FF_WHEEL_VARIANT is read by fastfields-dlpack's custom versioningit
+          # hook, which stamps the backend into the PEP 440 local version
+          # identifier at build time (0.0.0.dev1+cpu). Doing it in versioningit
+          # rather than by repacking the finished wheel means the version is
+          # correct in METADATA, in RECORD and in the generated _version.py
+          # from the outset, so nothing can drift out of sync.
+          CIBW_ENVIRONMENT: "CXX=clang++ FF_WHEEL_VARIANT=${{ inputs.backend }}"
           # `clang` for the C++ build; `git config --global safe.directory` so
           # versioningit can run `git describe` against the bind-mounted,
           # differently-owned /project tree inside the manylinux container --
@@ -158,23 +169,15 @@ jobs:
           CIBW_BEFORE_ALL_LINUX: >-
             (yum install -y clang || (apt-get update && apt-get install -y clang)) &&
             git config --global --add safe.directory '*'
-          # Repair FIRST (so the wheel carries a manylinux tag and any
-          # third-party deps are vendored -- but not our own rpath'd libs),
-          # THEN stamp the +<backend> local version label. Doing it the other
-          # way round leaves the unrepaired linux_x86_64 wheel sitting in
-          # {dest_dir} next to the repaired one, and pip cannot install that.
-          # /tmp/ff-repaired is wiped each time because all Python versions
-          # share one container and would otherwise see each other's wheels.
+          # Vendor third-party deps and apply the manylinux tag, but leave our
+          # own libfastfields* alone: the package already carries an
+          # $ORIGIN/lib rpath and ships them itself.
           CIBW_REPAIR_WHEEL_COMMAND_LINUX: >-
-            rm -rf /tmp/ff-repaired && mkdir -p /tmp/ff-repaired &&
             auditwheel repair
             --exclude libfastfields.so
             --exclude libfastfields-cpu.so
             --exclude libfastfields-cuda.so
-            -w /tmp/ff-repaired {wheel} &&
-            pip install -q wheel &&
-            python scripts/apply_local_version.py '/tmp/ff-repaired/*.whl'
-            {dest_dir} ${{ inputs.backend }}
+            -w {dest_dir} {wheel}
       - uses: actions/upload-artifact@v4
         with:
           name: dist-${{ inputs.backend }}-${{ matrix.os }}
