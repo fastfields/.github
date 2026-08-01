@@ -93,8 +93,11 @@ on:
       runners:
         description: >-
           JSON array of runner OSes for a compiled build. Defaults to Linux
-          only: the C++ Makefiles are not yet Windows-portable, and the macOS
-          leg needs cross-arch work before it can be trusted.
+          only: the C++ Makefiles are not yet Windows-portable
+          (fastfields-dlpack#8), and the macOS leg needs cross-arch work before
+          it can be trusted. Widening this ALSO requires a repair command for
+          the new platform -- see the note on
+          CIBW_REPAIR_WHEEL_COMMAND_LINUX below.
         type: string
         default: '["ubuntu-latest"]'
       cibw-build:
@@ -187,6 +190,21 @@ jobs:
           # Vendor third-party deps and apply the manylinux tag, but leave our
           # own libfastfields* alone: the package already carries an
           # $ORIGIN/lib rpath and ships them itself.
+          #
+          # NOTE for whoever widens `runners` past Linux: the exclusion above
+          # is the whole point of overriding this, and it does NOT carry over
+          # to the other platforms. cibuildwheel would fall back to its stock
+          # macOS (delocate) and Windows (delvewheel) repair, neither of which
+          # knows that libfastfields{,-cpu,-cuda} are ours and already shipped
+          # inside the wheel -- so they would be re-vendored, and on Windows
+          # name-mangled, breaking the loader path fastfields/dlpack/__init__.py
+          # sets up with os.add_dll_directory. Adding a macOS/Windows leg means
+          # adding the matching CIBW_REPAIR_WHEEL_COMMAND_{MACOS,WINDOWS} with
+          # the same excludes (`delocate-wheel --exclude libfastfields ...`,
+          # `delvewheel repair --exclude ... `) and checking the flag spelling
+          # against the tool versions cibuildwheel actually pins -- they are
+          # deliberately not pre-wired here, because an untested repair command
+          # for a leg that cannot run yet is worse than none.
           CIBW_REPAIR_WHEEL_COMMAND_LINUX: >-
             auditwheel repair
             --exclude libfastfields.so
