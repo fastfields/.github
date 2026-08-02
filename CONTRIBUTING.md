@@ -14,7 +14,7 @@ fastfields-kernels        voxelwise math (header-only, backend-agnostic, templat
   └─ fastfields-cuda-impl  CUDA kernels + launchers ─ fastfields-cuda-lib  (libfastfields-cuda, nvcc)           ┴─ fastfields-lib (libfastfields, DLTensor, device dispatch)
                                                                                                                    └─ fastfields-bind-py (fastfields.dlpack, nanobind)
                                                                                                                         ├─ fastfields-numpy / -cupy / -torch (fastfields.{numpy,cupy,torch})
-                                                                                                                        └─ fastfields             (fastfields.any)
+                                                                                                                        └─ fastfields             (fastfields.auto)
 ```
 
 Each repo has a **`CLAUDE.md`** describing its role, layout, and conventions;

@@ -1,7 +1,7 @@
 name: Test
 
 # Reusable test workflow shared by the fastfields Python packages
-# (numpy / torch / cupy / bind-py / any). Call it from a repo with:
+# (numpy / torch / cupy / bind-py / auto). Call it from a repo with:
 #
 #   jobs:
 #     pytest:
