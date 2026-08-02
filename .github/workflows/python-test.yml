@@ -80,9 +80,12 @@ jobs:
         run: clang++ --version
       - name: Install build toolchain (Windows)
         if: runner.os == 'Windows'
-        # NOTE: the Windows leg may be RED depending on the package. The C++
-        # build uses clang-style Makefiles; LLVM provides clang++ and make
-        # drives them. Kept visible (not hidden) so the gap stays tracked.
+        # NOTE: the C++ Makefiles (cpu-lib/lib/bind-py/fastfields-dlpack) were
+        # made Windows-portable -- clang-style flags with no -fPIC/-soname
+        # issues, and the recipes run under git bash. This should work, but
+        # there's no live/verified green Windows CI run yet, so it may still
+        # need iteration on a first real run. Kept visible (not hidden) so
+        # this stays tracked either way.
         run: choco install -y llvm make
       # pip *does* run `git submodule update --init --recursive` for a git+
       # install, so this cross-repo source build works as long as the pinned
