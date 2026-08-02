@@ -87,7 +87,9 @@ on:
           exactly -- cpu, cu118, cu126, cu128 -- because that label is what
           generate.py buckets on. Ignored when compiled is false: the
           pure-Python wrappers have no variant axis, and an unlabelled wheel
-          is deliberately listed in *every* backend folder.
+          is deliberately listed in *every* backend folder. Also selects the
+          `build-native` job's build (currently only "cpu" is wired -- see the
+          note there).
         type: string
         default: cpu
       runners:
@@ -100,10 +102,28 @@ on:
           CIBW_REPAIR_WHEEL_COMMAND_LINUX below.
         type: string
         default: '["ubuntu-latest"]'
-      cibw-build:
-        description: "CIBW_BUILD selector for a compiled build."
+      cibw-python-selectors:
+        description: >-
+          JSON array of bare Python-interpreter tags, one per `build-compiled`
+          matrix job -- each job builds only that interpreter's wheel
+          (CIBW_BUILD: "<tag>-*"). No wildcard here: the value also names the
+          job's upload-artifact, and GitHub Actions artifact names reject "*".
+          Keeping these as separate jobs -- rather than one CIBW_BUILD string
+          covering all of them -- is what lets each job `needs: build-native`
+          and download the once-per-OS native library instead of rebuilding
+          it.
         type: string
-        default: "cp39-* cp310-* cp311-* cp312-*"
+        default: '["cp39", "cp310", "cp311", "cp312"]'
+      manylinux-image:
+        description: >-
+          manylinux image family for a compiled Linux build (passed to both
+          CIBW_MANYLINUX_X86_64_IMAGE and the `build-native` job's container,
+          so the once-per-OS native library is built in the exact same glibc
+          environment cibuildwheel itself would use -- building it on the bare
+          runner instead would bake in a newer glibc than the manylinux tag
+          promises).
+        type: string
+        default: manylinux_2_28
       dispatch-index:
         description: "Ping fastfields/whl to regenerate the wheel index."
         type: boolean
@@ -135,12 +155,28 @@ jobs:
           name: dist-universal
           path: dist/*
 
-  # --------------------------------------------------------------- compiled
-  # cibuildwheel drives setup.py, which builds libfastfields{,-cpu} from the
-  # _fastfields_lib submodule and ships them inside the wheel.
-  build-compiled:
+  # ------------------------------------------------------------ build-native
+  # The compiled wheel's native libfastfields{,-cpu} does NOT depend on the
+  # Python ABI -- only on OS + backend -- so it is built exactly once per
+  # (OS, backend) here and handed to every `build-compiled` matrix job below
+  # as an artifact, instead of each of them re-running the ~templated `make`
+  # build from scratch (previously 4x per OS, once per cp3x wheel).
+  #
+  # Built inside the *same* manylinux container cibuildwheel itself uses
+  # (`inputs.manylinux-image`), not on the bare runner: the runner's glibc is
+  # newer than what the manylinux tag promises, and building there instead
+  # would silently bake incompatible symbol versions into a "manylinux" wheel.
+  # macOS (once `runners` is widened past Linux, fastfields-dlpack#8) has no
+  # such container -- cibuildwheel builds directly on the host there too --
+  # so that leg builds directly on the runner to match.
+  #
+  # STATUS: only the `cpu` backend is wired (mirrors release.yaml's current
+  # scope). Extending to a CUDA backend needs an nvcc-capable runner/image and
+  # `make USE_CUDA=1`, plus uploading libfastfields-cuda alongside the two
+  # libs below -- not done here since no CUDA wheel is attempted yet.
+  build-native:
     if: ${{ inputs.compiled }}
-    name: build (${{ inputs.backend }}, ${{ matrix.os }})
+    name: build native (${{ inputs.backend }}, ${{ matrix.os }})
     strategy:
       fail-fast: false
       matrix:
@@ -153,23 +189,114 @@ jobs:
           submodules: recursive     # _fastfields_lib + its own submodules
           token: ${{ secrets.CI_SUBMODULE_TOKEN }}
           fetch-depth: 0            # versioningit needs the tag
+      - name: Build libfastfields + libfastfields-cpu (manylinux container)
+        if: runner.os == 'Linux'
+        # `:latest` rather than pinning the exact tag cibuildwheel resolves
+        # internally for CIBW_MANYLINUX_X86_64_IMAGE: what has to match is the
+        # glibc ABI, which the manylinux_2_28 *policy* fixes regardless of
+        # image tag/patch level -- that's the whole point of the manylinux
+        # images -- so this doesn't need to track cibuildwheel's pin exactly.
+        #
+        # No `-j`: fastfields-lib's top-level Makefile links libfastfields.so
+        # without depending on the libcpu sub-make finishing first (its `lib`
+        # target lists `libcpu` before `$(BUILDDIR)/libfastfields.$(SOSUF)`,
+        # but the latter's own prerequisites don't include the former, so make
+        # -j is free to interleave them), so under parallel make the link
+        # races ahead and fails to find -lfastfields-cpu -- confirmed by
+        # hitting this exact race in a real run of this job. setup.py's
+        # from-source path has always invoked plain `make` (no `-j`), which is
+        # why the existing build never trips it; matching that here keeps this
+        # job as reliable as the build it's replacing. `-j` would be a
+        # legitimate follow-up (it needs a fix in fastfields-lib's Makefile
+        # first), not something this PR should paper over.
+        run: |
+          set -euo pipefail
+          docker run --rm -v "$PWD":/project -w /project \
+            "quay.io/pypa/${{ inputs.manylinux-image }}_x86_64:latest" \
+            bash -c '
+              set -euo pipefail
+              (yum install -y clang gcc-c++ ||
+               (apt-get update && apt-get install -y clang g++))
+              git config --global --add safe.directory "*"
+              make -C _fastfields_lib CXX=clang++
+            '
+      - name: Build libfastfields + libfastfields-cpu (host toolchain)
+        if: runner.os != 'Linux'
+        run: make -C _fastfields_lib CXX=clang++
+      - name: Stage the built libs flat for upload
+        run: |
+          set -euo pipefail
+          mkdir -p native-lib
+          cp _fastfields_lib/build/libfastfields.* native-lib/
+          cp _fastfields_lib/build/lib/libfastfields-cpu.* native-lib/
+          ls -l native-lib
+      - uses: actions/upload-artifact@v4
+        with:
+          name: native-${{ inputs.backend }}-${{ matrix.os }}
+          path: native-lib/*
+          if-no-files-found: error
+
+  # --------------------------------------------------------------- compiled
+  # cibuildwheel drives setup.py, which links the nanobind extension against
+  # the native libs `build-native` already built (via FASTFIELDS_PREBUILT_LIB
+  # -- setup.py copies them in and skips its own `make` step) and ships them
+  # inside the wheel. One job per (os, python-selector) so each downloads the
+  # native-lib artifact independently and the matrix is fully parallel.
+  build-compiled:
+    if: ${{ inputs.compiled }}
+    name: build (${{ inputs.backend }}, ${{ matrix.os }}, ${{ matrix.python }})
+    needs: build-native
+    strategy:
+      fail-fast: false
+      matrix:
+        os: ${{ fromJSON(inputs.runners) }}
+        python: ${{ fromJSON(inputs.cibw-python-selectors) }}
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.tag }}
+          submodules: recursive     # _fastfields_lib + its own submodules
+          token: ${{ secrets.CI_SUBMODULE_TOKEN }}
+          fetch-depth: 0            # versioningit needs the tag
+      # Downloaded to a fixed path under the checkout root so it lands inside
+      # cibuildwheel's /project mount; FASTFIELDS_PREBUILT_LIB below points
+      # setup.py at it. build-native staged the two libs flat (no
+      # build/ or build/lib/ nesting), matching what setup.py expects there.
+      - uses: actions/download-artifact@v4
+        with:
+          name: native-${{ inputs.backend }}-${{ matrix.os }}
+          path: prebuilt-native-lib
       - uses: pypa/cibuildwheel@v2.21
         env:
-          CIBW_BUILD: ${{ inputs.cibw-build }}
+          CIBW_BUILD: ${{ matrix.python }}-*
           CIBW_SKIP: "*-musllinux_* *_i686 *-win32"
           # AlmaLinux 8 rather than cibuildwheel's default CentOS 7 image: its
           # system libstdc++ headers are GCC 8, which clang picks up without
           # any --gcc-toolchain steering. (CentOS 7's are GCC 4.8, whose
           # libstdc++ is patchy for C++11.) glibc 2.28+ is a fine floor for a
           # project that has never shipped a wheel.
-          CIBW_MANYLINUX_X86_64_IMAGE: manylinux_2_28
+          CIBW_MANYLINUX_X86_64_IMAGE: ${{ inputs.manylinux-image }}
           # FF_WHEEL_VARIANT is read by fastfields-dlpack's custom versioningit
           # hook, which stamps the backend into the PEP 440 local version
           # identifier at build time (0.0.0.dev1+cpu). Doing it in versioningit
           # rather than by repacking the finished wheel means the version is
           # correct in METADATA, in RECORD and in the generated _version.py
           # from the outset, so nothing can drift out of sync.
+          #
           CIBW_ENVIRONMENT: "CXX=clang++ FF_WHEEL_VARIANT=${{ inputs.backend }}"
+          # FASTFIELDS_PREBUILT_LIB points setup.py at the native libs
+          # `build-native` already built (download-artifact path above,
+          # relative to the checkout root), so it copies them in and skips its
+          # own `make` invocation entirely. Platform-specific because the path
+          # cibuildwheel sees it at differs: /project is where the Linux
+          # (manylinux container) build mounts the checkout. A future macOS
+          # leg builds directly on the runner (no container), so it would need
+          # CIBW_ENVIRONMENT_MACOS with the checkout's real host path instead
+          # -- not wired here since macOS isn't in `runners` yet.
+          CIBW_ENVIRONMENT_LINUX: >-
+            CXX=clang++ FF_WHEEL_VARIANT=${{ inputs.backend }}
+            FASTFIELDS_PREBUILT_LIB=/project/prebuilt-native-lib
           # `clang` for the C++ build -- and `gcc-c++` alongside it, which is
           # NOT redundant: clang is only the compiler driver, it uses the
           # system GCC's libstdc++ headers. Without gcc-c++ the manylinux image
@@ -213,21 +340,30 @@ jobs:
             -w {dest_dir} {wheel}
       - uses: actions/upload-artifact@v4
         with:
-          name: dist-${{ inputs.backend }}-${{ matrix.os }}
+          # matrix.python included: this job now runs once per (os, python
+          # selector) instead of once per os, so the name must stay unique
+          # per job or upload-artifact rejects the collision.
+          name: dist-${{ inputs.backend }}-${{ matrix.os }}-${{ matrix.python }}
           path: wheelhouse/*.whl
 
   # -------------------------------------------------------------- publish
   publish:
     name: publish to the release
-    needs: [build-pure, build-compiled]
-    # Exactly one of the two build jobs runs; `needs` on a skipped job resolves
-    # to 'skipped', so gate on "nothing actually failed" rather than success().
+    needs: [build-native, build-pure, build-compiled]
+    # Exactly one of {build-pure, build-compiled} runs (build-native only
+    # alongside build-compiled); `needs` on a skipped job resolves to
+    # 'skipped', so gate on "nothing actually failed" rather than success().
     if: ${{ always() && !failure() && !cancelled() }}
     runs-on: ubuntu-latest
     steps:
+      # `pattern: dist-*` matters here: without it this would also sweep up
+      # the `native-*` artifact (the raw .so files from build-native), which
+      # would then get uploaded onto the release below by `gh release upload
+      # dist/*` alongside the actual wheels/sdist.
       - uses: actions/download-artifact@v4
         with:
           path: dist
+          pattern: dist-*
           merge-multiple: true
 
       # Guard rail. The built version must equal the release tag *exactly*,
