@@ -196,6 +196,19 @@ jobs:
         # glibc ABI, which the manylinux_2_28 *policy* fixes regardless of
         # image tag/patch level -- that's the whole point of the manylinux
         # images -- so this doesn't need to track cibuildwheel's pin exactly.
+        #
+        # No `-j`: fastfields-lib's top-level Makefile links libfastfields.so
+        # without depending on the libcpu sub-make finishing first (its `lib`
+        # target lists `libcpu` before `$(BUILDDIR)/libfastfields.$(SOSUF)`,
+        # but the latter's own prerequisites don't include the former, so make
+        # -j is free to interleave them), so under parallel make the link
+        # races ahead and fails to find -lfastfields-cpu -- confirmed by
+        # hitting this exact race in a real run of this job. setup.py's
+        # from-source path has always invoked plain `make` (no `-j`), which is
+        # why the existing build never trips it; matching that here keeps this
+        # job as reliable as the build it's replacing. `-j` would be a
+        # legitimate follow-up (it needs a fix in fastfields-lib's Makefile
+        # first), not something this PR should paper over.
         run: |
           set -euo pipefail
           docker run --rm -v "$PWD":/project -w /project \
@@ -205,11 +218,11 @@ jobs:
               (yum install -y clang gcc-c++ ||
                (apt-get update && apt-get install -y clang g++))
               git config --global --add safe.directory "*"
-              make -C _fastfields_lib CXX=clang++ -j"$(nproc)"
+              make -C _fastfields_lib CXX=clang++
             '
       - name: Build libfastfields + libfastfields-cpu (host toolchain)
         if: runner.os != 'Linux'
-        run: make -C _fastfields_lib CXX=clang++ -j"$(sysctl -n hw.ncpu)"
+        run: make -C _fastfields_lib CXX=clang++
       - name: Stage the built libs flat for upload
         run: |
           set -euo pipefail
