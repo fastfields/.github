@@ -1,0 +1,173 @@
+name: Bump a submodule pin
+
+# Reusable workflow shared by the layered C++/CUDA repos. Fetches the pinned
+# submodule's remote default-branch HEAD, updates the local gitlink to that
+# SHA, and opens a PR -- fastfields-lib#15/#10.
+#
+# Call it with:
+#
+#   jobs:
+#     bump:
+#       permissions:
+#         contents: write
+#         pull-requests: write
+#       uses: fastfields/.github/.github/workflows/cpp-submodule-bump.yml@main
+#       with:
+#         path: impl
+#         repo: fastfields/fastfields-cpu-impl
+#
+# Two ways this runs:
+#   * workflow_dispatch on the calling repo -- fully manual, works today with
+#     nothing extra to configure beyond the two repo settings noted below.
+#   * repository_dispatch fired from the producer repo's own CI on push to
+#     main -- see each repo's notify-parent.yaml. This needs a token with
+#     contents:write on the CONSUMER (this) repo, held as a secret on the
+#     PRODUCER repo (mirrors the WHL_DISPATCH_TOKEN pattern in
+#     fastfields/fastfields's release.yaml) -- a human has to create it; see
+#     each producer repo's notify-parent.yaml for the exact secret name.
+#
+# Two repo settings this workflow relies on (Settings -> Actions -> General):
+#   * "Workflow permissions" -- must allow read/write, or the job-level
+#     `permissions: contents: write` below has nothing to elevate.
+#   * "Allow GitHub Actions to create and approve pull requests" -- a SEPARATE
+#     toggle that gates `gh pr create` specifically; contents:write alone is
+#     not enough to open the PR. If it's off, the branch still gets pushed and
+#     the log prints a ready-to-use compare URL so a human can open the PR by
+#     hand -- this workflow degrades instead of silently doing half its job.
+
+on:
+  workflow_call:
+    inputs:
+      path:
+        description: "Gitlink path of the submodule in this repo (e.g. 'impl')"
+        type: string
+        required: true
+      repo:
+        description: "owner/repo of the pinned submodule"
+        type: string
+        required: true
+      branch_prefix:
+        description: "Prefix for the bump branch name"
+        type: string
+        default: "claude/15-bump"
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  bump:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Compute old/new pin and skip if already current
+        id: plan
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PATH_IN: ${{ inputs.path }}
+          REPO: ${{ inputs.repo }}
+        run: |
+          set -euo pipefail
+          old_sha=$(git rev-parse "HEAD:$PATH_IN")
+          branch=$(gh api "repos/$REPO" --jq .default_branch)
+          new_sha=$(gh api "repos/$REPO/branches/$branch" --jq .commit.sha)
+
+          echo "old_sha=$old_sha" >> "$GITHUB_OUTPUT"
+          echo "new_sha=$new_sha" >> "$GITHUB_OUTPUT"
+          echo "branch=$branch" >> "$GITHUB_OUTPUT"
+
+          if [ "$old_sha" = "$new_sha" ]; then
+            echo "up_to_date=true" >> "$GITHUB_OUTPUT"
+            echo "$PATH_IN already pinned at $REPO@$branch tip ($old_sha) -- nothing to bump."
+            exit 0
+          fi
+          echo "up_to_date=false" >> "$GITHUB_OUTPUT"
+
+          bump_branch="${{ inputs.branch_prefix }}-$(basename "$PATH_IN")-${new_sha:0:7}"
+          echo "bump_branch=$bump_branch" >> "$GITHUB_OUTPUT"
+
+          if git ls-remote --exit-code --heads origin "$bump_branch" >/dev/null 2>&1; then
+            echo "branch_exists=true" >> "$GITHUB_OUTPUT"
+            echo "$bump_branch already exists on origin -- assuming a bump PR is already open, skipping."
+          else
+            echo "branch_exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build the commit/PR message body
+        if: steps.plan.outputs.up_to_date == 'false' && steps.plan.outputs.branch_exists == 'false'
+        id: msg
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ inputs.repo }}
+          PATH_IN: ${{ inputs.path }}
+          OLD_SHA: ${{ steps.plan.outputs.old_sha }}
+          NEW_SHA: ${{ steps.plan.outputs.new_sha }}
+          BRANCH: ${{ steps.plan.outputs.branch }}
+        run: |
+          set -euo pipefail
+          # One-line-per-commit log of what this bump pulls in, same spirit as
+          # the manual pin-bump commits this session (e.g. fastfields-cpu-lib#64).
+          commits=$(gh api "repos/$REPO/compare/${OLD_SHA}...${NEW_SHA}" \
+            --jq '.commits[] | "- " + (.sha[0:7]) + " " + (.commit.message | split("\n")[0])')
+          if [ -z "$commits" ]; then
+            commits="(no commit log available -- compare returned no commits, check manually)"
+          fi
+          latest_subject=$(gh api "repos/$REPO/commits/$NEW_SHA" --jq '.commit.message | split("\n")[0]')
+
+          {
+            echo "subject=chore: bump $PATH_IN submodule pin to ${latest_subject}"
+            echo "body<<EOF_BODY"
+            echo "Bumps the \`$PATH_IN\` submodule pin ($REPO) to \`$BRANCH\` HEAD."
+            echo
+            echo "\`$PATH_IN\`: \`${OLD_SHA:0:7}\` -> \`${NEW_SHA:0:7}\`"
+            echo
+            echo "Commits pulled in:"
+            echo "$commits"
+            echo
+            echo "Verification: this is an automated bump with no local C++ build --"
+            echo "this repo's own CI (test/lint workflows) builds and tests against the"
+            echo "new pin on this PR; a green run here is the verification signal."
+            echo
+            echo "part of fastfields-lib#15"
+            echo "EOF_BODY"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Commit the bumped gitlink and push
+        if: steps.plan.outputs.up_to_date == 'false' && steps.plan.outputs.branch_exists == 'false'
+        env:
+          PATH_IN: ${{ inputs.path }}
+          NEW_SHA: ${{ steps.plan.outputs.new_sha }}
+          BUMP_BRANCH: ${{ steps.plan.outputs.bump_branch }}
+          SUBJECT: ${{ steps.msg.outputs.subject }}
+          BODY: ${{ steps.msg.outputs.body }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git checkout -b "$BUMP_BRANCH"
+          # Updates just the gitlink entry in the index -- no need to actually
+          # init/checkout the submodule, since a submodule pin is only a tree
+          # entry (mode 160000) recording a commit SHA.
+          git update-index --cacheinfo 160000,"$NEW_SHA","$PATH_IN"
+          git commit -m "$SUBJECT" -m "$BODY"
+          git push origin "$BUMP_BRANCH"
+
+      - name: Open the PR
+        if: steps.plan.outputs.up_to_date == 'false' && steps.plan.outputs.branch_exists == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BUMP_BRANCH: ${{ steps.plan.outputs.bump_branch }}
+          SUBJECT: ${{ steps.msg.outputs.subject }}
+          BODY: ${{ steps.msg.outputs.body }}
+        run: |
+          set -euo pipefail
+          if gh pr create --title "$SUBJECT" --body "$BODY" --head "$BUMP_BRANCH" --base "${{ github.event.repository.default_branch || 'main' }}"; then
+            exit 0
+          fi
+          echo "::warning::could not open a PR automatically (branch '$BUMP_BRANCH' was pushed). This usually means 'Allow GitHub Actions to create and approve pull requests' is disabled under Settings -> Actions -> General on this repo -- enable it, or open the PR by hand:"
+          echo "https://github.com/${{ github.repository }}/compare/${{ github.event.repository.default_branch || 'main' }}...${BUMP_BRANCH}?expand=1"
