@@ -1,0 +1,142 @@
+name: Submodule staleness check
+
+# Reusable workflow shared by the layered C++/CUDA repos (kernels -> cpu/cuda-impl
+# -> cpu/cuda-lib -> lib). Reports, per pinned git submodule, how far the pinned
+# commit is behind (or whether it is even an ancestor of) that submodule's own
+# remote default branch -- fastfields-lib#15/#10.
+#
+# This is a VISIBILITY check, not a merge gate: it never fails the job. A repo
+# may legitimately stay pinned behind main for stability (see fastfields-lib#15
+# "Scope discipline"); the point is surfacing that at review time instead of it
+# staying invisible until a downstream build or test breaks, which is what
+# actually happened before this existed.
+#
+# Call it with:
+#
+#   jobs:
+#     submodule-staleness:
+#       permissions:
+#         contents: read
+#         pull-requests: write
+#       uses: fastfields/.github/.github/workflows/cpp-submodule-staleness.yml@main
+#       with:
+#         submodules: |
+#           [{"path": "impl", "repo": "fastfields/fastfields-cpu-impl"}]
+#
+# Only needs the caller's default GITHUB_TOKEN: comparing commit ancestry
+# between two PUBLIC repos via the GitHub API needs no elevated permission, and
+# the PR-comment step only ever writes to the calling repo's own pull request.
+
+on:
+  workflow_call:
+    inputs:
+      submodules:
+        description: >
+          JSON array of {"path": "<gitlink path in this repo>",
+          "repo": "<owner/repo of the pinned submodule>"}, one entry per
+          submodule pin this repo carries onto another fastfields-* repo.
+        type: string
+        required: true
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  staleness:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Compare each pinned submodule against its remote default branch
+        id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SUBMODULES_JSON: ${{ inputs.submodules }}
+        run: |
+          set -euo pipefail
+
+          rows="| submodule | pinned commit | tracks | status | behind by |"
+          rows="$rows"$'\n'"|---|---|---|---|---|"
+
+          while IFS= read -r row; do
+            path=$(jq -r '.path' <<<"$row")
+            repo=$(jq -r '.repo' <<<"$row")
+
+            if ! pinned_sha=$(git rev-parse -q --verify "HEAD:$path" 2>/dev/null); then
+              echo "::warning::submodule-staleness: '$path' is not a tree entry at HEAD -- skipping $repo"
+              rows="$rows"$'\n'"| \`$path\` | (not found) | \`$repo\` | **check skipped** | ? |"
+              continue
+            fi
+            short=${pinned_sha:0:7}
+            branch=$(gh api "repos/$repo" --jq .default_branch)
+            compare=$(gh api "repos/$repo/compare/${pinned_sha}...${branch}")
+            status=$(jq -r '.status' <<<"$compare")
+            ahead_by=$(jq -r '.ahead_by' <<<"$compare")   # commits $branch has that the pin doesn't
+            behind_by=$(jq -r '.behind_by' <<<"$compare")  # commits the pin has that $branch doesn't
+            url="https://github.com/$repo/commit/$pinned_sha"
+
+            case "$status" in
+              identical)
+                echo "OK: $repo/$path pinned at $short, matches $branch tip"
+                rows="$rows"$'\n'"| \`$path\` | [\`$short\`]($url) | \`$repo@$branch\` | up to date | 0 |"
+                ;;
+              ahead)
+                # $branch is "ahead" of the pin: the pin is exactly $ahead_by
+                # commits behind the branch tip it's supposed to track.
+                echo "::warning::submodule-staleness: $repo ($path) is $ahead_by commit(s) behind $branch (pinned at $short) -- see fastfields-lib#15"
+                rows="$rows"$'\n'"| \`$path\` | [\`$short\`]($url) | \`$repo@$branch\` | behind | $ahead_by |"
+                ;;
+              diverged)
+                # The pinned commit is not on $branch at all (e.g. it was
+                # captured off an unmerged PR branch before a squash-merge, or
+                # the branch was rewritten) -- this is the case that bit us in
+                # the fastfields-lib#50 incident. Worth flagging even more
+                # loudly than a plain "behind".
+                echo "::warning::submodule-staleness: $repo ($path) pin $short is NOT an ancestor of $branch (diverged: $ahead_by commit(s) behind, $behind_by commit(s) not on $branch at all) -- the pin may reference an unmerged/rewritten commit"
+                rows="$rows"$'\n'"| \`$path\` | [\`$short\`]($url) | \`$repo@$branch\` | **diverged** | $ahead_by (+$behind_by not on $branch) |"
+                ;;
+              behind)
+                # $branch is "behind" the pin: the pin references a commit
+                # $branch's tip hasn't reached, but no divergence.
+                echo "::warning::submodule-staleness: $repo ($path) pin $short is $behind_by commit(s) ahead of $branch -- not an ancestor situation to double-check"
+                rows="$rows"$'\n'"| \`$path\` | [\`$short\`]($url) | \`$repo@$branch\` | pin ahead of $branch | 0 (+$behind_by ahead) |"
+                ;;
+              *)
+                echo "::warning::submodule-staleness: unexpected compare status '$status' for $repo ($path) at $short"
+                rows="$rows"$'\n'"| \`$path\` | [\`$short\`]($url) | \`$repo@$branch\` | unknown ($status) | ? |"
+                ;;
+            esac
+          done < <(jq -c '.[]' <<<"$SUBMODULES_JSON")
+
+          {
+            echo "## Submodule staleness (fastfields-lib#15)"
+            echo "$rows"
+            echo
+            echo "_Non-blocking visibility check -- a repo may intentionally stay pinned behind main._"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          {
+            echo "rows<<EOF_ROWS"
+            echo "$rows"
+            echo "EOF_ROWS"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Create or update the PR comment
+        if: github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ROWS: ${{ steps.check.outputs.rows }}
+        run: |
+          set -euo pipefail
+          marker="<!-- submodule-staleness-report -->"
+          body=$(printf '%s\n### Submodule staleness (non-blocking -- fastfields-lib#15)\n%s\n' "$marker" "$ROWS")
+          pr_number=${{ github.event.pull_request.number }}
+          existing=$(gh api "repos/${{ github.repository }}/issues/$pr_number/comments" --paginate \
+            --jq "[.[] | select(.body | startswith(\"$marker\"))][0].id // empty")
+          if [ -n "$existing" ]; then
+            gh api -X PATCH "repos/${{ github.repository }}/issues/comments/$existing" -f body="$body" >/dev/null
+          else
+            gh api -X POST "repos/${{ github.repository }}/issues/$pr_number/comments" -f body="$body" >/dev/null
+          fi
