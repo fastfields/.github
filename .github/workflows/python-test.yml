@@ -1,7 +1,7 @@
 name: Test
 
 # Reusable test workflow shared by the fastfields Python packages
-# (numpy / torch / cupy / bind-py / auto). Call it from a repo with:
+# (numpy / torch / cupy / bind-py / auto / helpers). Call it from a repo with:
 #
 #   jobs:
 #     pytest:
@@ -16,6 +16,10 @@ name: Test
 # The fastfields-dlpack install step is skipped automatically for
 # fastfields-dlpack itself, which *is* the dlpack package -- the guard keys off
 # the calling repo's name, so no per-repo input is needed.
+#
+# A repo that does not depend on fastfields-dlpack at all passes
+# `needs-dlpack: false`, which skips both that install *and* the C++ toolchain
+# steps that exist only to serve it -- see the input's description below.
 
 on:
   workflow_call:
@@ -28,6 +32,21 @@ on:
         description: "JSON array of Python versions for the matrix"
         type: string
         default: '["3.9", "3.11", "3.12"]'
+      needs-dlpack:
+        description: >-
+          Whether this package needs fastfields-dlpack installed to run its
+          tests. Defaults to true, which is right for every wrapper that calls
+          the compiled bindings (numpy / torch / cupy / auto) and for
+          fastfields-dlpack itself, whose own `pip install ".[test]"` builds
+          the extension. Set it to false for a package with no dlpack
+          dependency -- fastfields-helpers is pure-Python and stdlib-only --
+          to skip both the cross-repo source install below and the clang
+          toolchain steps that exist solely to compile it. Without this, such
+          a repo would build the entire C++ chain (recursive submodule
+          checkout + clang compile) on every runner in the matrix just to
+          import a handful of stdlib-only functions.
+        type: boolean
+        default: true
 
 permissions:
   contents: read
@@ -70,16 +89,20 @@ jobs:
           # pyproject.toml, so repeat installs of numpy/torch/... are fast.
           cache: "pip"
           cache-dependency-path: pyproject.toml
+      # The three toolchain steps below exist only so the fastfields-dlpack
+      # C++ build has a clang++ -- either the cross-repo source install further
+      # down, or (for fastfields-dlpack itself) its own `pip install ".[test]"`.
+      # A `needs-dlpack: false` caller compiles nothing, so they are skipped.
       - name: Install build toolchain (Linux)
-        if: runner.os == 'Linux'
+        if: ${{ inputs.needs-dlpack && runner.os == 'Linux' }}
         run: sudo apt-get update && sudo apt-get install -y clang
       - name: Install build toolchain (macOS)
-        if: runner.os == 'macOS'
+        if: ${{ inputs.needs-dlpack && runner.os == 'macOS' }}
         # clang++ ships with the Xcode Command Line Tools, already present on
         # the macOS runners, so there is nothing to install here.
         run: clang++ --version
       - name: Install build toolchain (Windows)
-        if: runner.os == 'Windows'
+        if: ${{ inputs.needs-dlpack && runner.os == 'Windows' }}
         # NOTE: the C++ Makefiles (cpu-lib/lib/bind-py/fastfields-dlpack) were
         # made Windows-portable -- clang-style flags with no -fPIC/-soname
         # issues, and the recipes run under git bash. This should work, but
@@ -93,9 +116,9 @@ jobs:
       # index carries a release, prefer installing from there instead.
       # For fastfields-dlpack itself this step is skipped (it IS dlpack); the
       # guard uses `github.repository`, which in a reusable workflow resolves
-      # to the *calling* repo.
+      # to the *calling* repo. `needs-dlpack: false` skips it everywhere.
       - name: Install fastfields-dlpack from source
-        if: ${{ github.repository != 'fastfields/fastfields-dlpack' }}
+        if: ${{ inputs.needs-dlpack && github.repository != 'fastfields/fastfields-dlpack' }}
         run: pip install "fastfields-dlpack @ git+https://github.com/fastfields/fastfields-dlpack@main"
       - name: Install package + test deps
         run: pip install ".[test]"
