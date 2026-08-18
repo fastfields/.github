@@ -15,6 +15,10 @@ fastfields-kernels        voxelwise math (header-only, backend-agnostic, templat
                                                                                                                    └─ fastfields-bind-py (fastfields.dlpack, nanobind)
                                                                                                                         ├─ fastfields-numpy / -cupy / -torch (fastfields.{numpy,cupy,torch})
                                                                                                                         └─ fastfields             (fastfields.auto)
+
+fastfields-helpers  (fastfields.helpers -- pure-Python enums/normalisers, zero deps)
+  └─ consumed by fastfields-numpy / -cupy / -torch / fastfields, as an
+     independent sibling of fastfields-dlpack (neither depends on the other)
 ```
 
 Each repo has a **`CLAUDE.md`** describing its role, layout, and conventions;
@@ -246,9 +250,13 @@ keeps one-line callers per package; we inline the steps for now — extract a
 - `lint.yaml` — `ruff check`, `ruff format --check`, `codespell` (push + PR).
 - `test.yaml` — a Python-version matrix: checkout `submodules: recursive`,
   install the package `.[test]`, run `pytest` from a neutral cwd. Path-filter on
-  `fastfields/**`, `tests/**`, `pyproject.toml`. Wrapper repos need
-  `fastfields-dlpack`; until it is on PyPI / the wheel index they build it from
-  the sibling repo.
+  `fastfields/**`, `tests/**`, `pyproject.toml`. Wrapper repos (numpy/torch/cupy)
+  and the umbrella `fastfields` repo need `fastfields-dlpack`; until it is on
+  PyPI / the wheel index they build it from the sibling repo. `fastfields-helpers`
+  is the one repo that needs neither — it is pure Python with zero dependencies
+  — so its `test.yaml` passes the reusable workflow's `needs-dlpack: false`
+  input to skip that build entirely (fastfields/.github#10) rather than
+  compiling the whole C++ chain to test stdlib-only code.
 - `docs.yaml` — build the site and deploy to Pages (`permissions: pages: write,
   id-token: write`, `concurrency: {group: pages}`).
 - C++ repos get a `test.yaml` too: the **cpu-lib** one (`make test
