@@ -10,11 +10,11 @@ name: Test
 #       uses: fastfields/.github/.github/workflows/python-test.yml@main
 #       secrets: inherit
 #
-# `secrets: inherit` lets the checkout pick up CI_SUBMODULE_TOKEN where a repo
-# has it (fastfields-dlpack needs it for its C++ submodule chain); where it is
-# not set the checkout falls back to the default token, which is fine for a
-# pure-Python checkout. That fallback has to be written out as
-# `secrets.X || github.token` -- see the checkout step.
+# `secrets: inherit` is what lets the checkout reach CI_SUBMODULE_TOKEN, which
+# fastfields-dlpack needs for its C++ submodule chain. Only that repo gets it:
+# every other caller checks out with the default token, deliberately -- see the
+# checkout step for why passing the secret to a repo that does not need it is
+# actively harmful.
 #
 # The fastfields-dlpack install step is skipped automatically for
 # fastfields-dlpack itself, which *is* the dlpack package -- the guard keys off
@@ -81,17 +81,29 @@ jobs:
       - uses: actions/checkout@v5
         with:
           submodules: recursive
-          # `|| github.token` is load-bearing, and its absence was a latent
-          # trap for any caller without CI_SUBMODULE_TOKEN: an unset secret
-          # interpolates to the empty string, and actions/checkout does NOT
-          # treat an empty `token:` as "use the default" -- it uses it, and
-          # the fetch dies with `could not read Username for
-          # 'https://github.com': terminal prompts disabled` before a single
-          # step of the job runs. Only fastfields-dlpack needs the secret (for
-          # its private C++ submodule chain); every other caller needs this
-          # fallback, and `fastfields` hit it the moment it stopped carrying
-          # its own bespoke copy of this job.
-          token: ${{ secrets.CI_SUBMODULE_TOKEN || github.token }}
+          # CI_SUBMODULE_TOKEN goes ONLY to the one repo that needs it.
+          # fastfields-dlpack needs it to clone its C++ submodule chain; no
+          # other caller has a submodule at all, and handing them a PAT they
+          # do not need makes their checkout fail whenever that PAT is stale
+          # -- which it currently is. Observed: six matrix legs of
+          # fastfields/fastfields dying in 35s at `actions/checkout` with
+          #
+          #     fatal: could not read Username for 'https://github.com':
+          #     terminal prompts disabled
+          #
+          # as soon as that repo dropped its own bespoke copy of this job and
+          # started inheriting the org-level secret through `secrets:
+          # inherit`. A plain `secrets.X || github.token` does NOT save them:
+          # the secret is set, just not usable, so the fallback never fires.
+          # `github.repository` resolves to the *calling* repo here, the same
+          # way the dlpack install step below uses it.
+          #
+          # Expression semantics, since the precedence is easy to misread:
+          # when the repo does not match, `A && B` is false and the whole
+          # expression is `github.token`; when it matches but the secret is
+          # empty, `A && B` is the empty string, which is falsy, so it is
+          # `github.token` again. Either way checkout gets a usable token.
+          token: ${{ github.repository == 'fastfields/fastfields-dlpack' && secrets.CI_SUBMODULE_TOKEN || github.token }}
           # versioningit derives the version from `git describe`, which needs
           # the tags -- a shallow (depth 1) checkout hides them and the version
           # silently falls back to "0+unknown".
