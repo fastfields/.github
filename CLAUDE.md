@@ -38,8 +38,12 @@ Python packages
 │
 └─ fastfields-lib
    └─ fastfields-binds                       # Python bindings from dlpack to fastfields-lib, using nanobinds
-      ├─ fastfields-numpy   ─┐               # User-friendly numpy interface (with checks)
-      ├─ fastfields-cupy    ─┤               # User-friendly cupy  interface (with checks)
-      └─ fastfields-torch   ─┤               # User-friendly torch interface (with checks and autodiff)
-                             └─ fastfields   # Meta package
+      └─ fastfields                          # One pure-Python distribution shipping
+                                             # fastfields.{helpers,numpy,cupy,torch,auto}:
+                                             # user-friendly numpy/cupy/torch interfaces
+                                             # (with checks, and autodiff on torch), the
+                                             # auto-dispatching front end, and the shared
+                                             # enums/normalisers. Absorbed the four former
+                                             # fastfields-{helpers,numpy,cupy,torch} repos
+                                             # (fastfields#3).
 ```

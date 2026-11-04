@@ -1,17 +1,20 @@
 name: Test
 
-# Reusable test workflow shared by the fastfields Python packages
-# (numpy / torch / cupy / bind-py / auto / helpers). Call it from a repo with:
+# Reusable test workflow shared by the fastfields Python packages. Since
+# fastfields#3 merged the four wrapper distributions into `fastfields`, the
+# callers are `fastfields` (which ships fastfields.{helpers,numpy,cupy,torch,
+# auto}) and `fastfields-dlpack`. Call it from a repo with:
 #
 #   jobs:
 #     pytest:
 #       uses: fastfields/.github/.github/workflows/python-test.yml@main
 #       secrets: inherit
 #
-# `secrets: inherit` lets the checkout pick up CI_SUBMODULE_TOKEN where a repo
-# defines it (fastfields-dlpack needs it for its C++ submodule chain); repos
-# without that secret fall back to the default token, which is fine for a
-# pure-Python checkout.
+# `secrets: inherit` is what lets the checkout reach CI_SUBMODULE_TOKEN, which
+# fastfields-dlpack needs for its C++ submodule chain. Only that repo gets it:
+# every other caller checks out with the default token, deliberately -- see the
+# checkout step for why passing the secret to a repo that does not need it is
+# actively harmful.
 #
 # The fastfields-dlpack install step is skipped automatically for
 # fastfields-dlpack itself, which *is* the dlpack package -- the guard keys off
@@ -35,16 +38,17 @@ on:
       needs-dlpack:
         description: >-
           Whether this package needs fastfields-dlpack installed to run its
-          tests. Defaults to true, which is right for every wrapper that calls
-          the compiled bindings (numpy / torch / cupy / auto) and for
-          fastfields-dlpack itself, whose own `pip install ".[test]"` builds
-          the extension. Set it to false for a package with no dlpack
-          dependency -- fastfields-helpers is pure-Python and stdlib-only --
-          to skip both the cross-repo source install below and the clang
-          toolchain steps that exist solely to compile it. Without this, such
-          a repo would build the entire C++ chain (recursive submodule
-          checkout + clang compile) on every runner in the matrix just to
-          import a handful of stdlib-only functions.
+          tests. Defaults to true, which is right for `fastfields` (whose
+          numpy / torch / cupy / auto namespaces all call the compiled
+          bindings) and for fastfields-dlpack itself, whose own
+          `pip install ".[test]"` builds the extension. Set it to false for a
+          package with no dlpack dependency, to skip both the install below
+          and the clang toolchain steps that exist solely to serve it --
+          otherwise such a repo would build the entire C++ chain (recursive
+          submodule checkout + clang compile) on every runner in the matrix
+          for nothing. This was fastfields-helpers' case before it was merged
+          into `fastfields`; no current caller passes false, and the input is
+          kept because the cost of getting it wrong is an hour of CI per push.
         type: boolean
         default: true
 
@@ -77,7 +81,29 @@ jobs:
       - uses: actions/checkout@v5
         with:
           submodules: recursive
-          token: ${{ secrets.CI_SUBMODULE_TOKEN }}
+          # CI_SUBMODULE_TOKEN goes ONLY to the one repo that needs it.
+          # fastfields-dlpack needs it to clone its C++ submodule chain; no
+          # other caller has a submodule at all, and handing them a PAT they
+          # do not need makes their checkout fail whenever that PAT is stale
+          # -- which it currently is. Observed: six matrix legs of
+          # fastfields/fastfields dying in 35s at `actions/checkout` with
+          #
+          #     fatal: could not read Username for 'https://github.com':
+          #     terminal prompts disabled
+          #
+          # as soon as that repo dropped its own bespoke copy of this job and
+          # started inheriting the org-level secret through `secrets:
+          # inherit`. A plain `secrets.X || github.token` does NOT save them:
+          # the secret is set, just not usable, so the fallback never fires.
+          # `github.repository` resolves to the *calling* repo here, the same
+          # way the dlpack install step below uses it.
+          #
+          # Expression semantics, since the precedence is easy to misread:
+          # when the repo does not match, `A && B` is false and the whole
+          # expression is `github.token`; when it matches but the secret is
+          # empty, `A && B` is the empty string, which is falsy, so it is
+          # `github.token` again. Either way checkout gets a usable token.
+          token: ${{ github.repository == 'fastfields/fastfields-dlpack' && secrets.CI_SUBMODULE_TOKEN || github.token }}
           # versioningit derives the version from `git describe`, which needs
           # the tags -- a shallow (depth 1) checkout hides them and the version
           # silently falls back to "0+unknown".
@@ -110,16 +136,47 @@ jobs:
         # need iteration on a first real run. Kept visible (not hidden) so
         # this stays tracked either way.
         run: choco install -y llvm make
+      # Dogfood our own wheel index (fastfields#6). Installing from the index
+      # is the path we tell users to use, so CI should be the first thing to
+      # notice when it breaks -- and it is the only coverage the index will
+      # ever get, since nothing else in the org installs from it.
+      #
+      # The `git+` source build is kept as a FALLBACK, not as the primary
+      # path, because no release has been published yet: the index is live and
+      # correct but empty, so the first attempt genuinely resolves to nothing
+      # today and a hard failure would turn every wrapper repo red for a
+      # reason that is not their bug. The `::warning::` is deliberate and
+      # should be checked, not ignored -- once `0.0.dev0` is published it must
+      # stop appearing, and at that point the fallback can be deleted outright
+      # (whl#1 tracks cutting that first release).
+      #
+      # `--extra-index-url`, not `--index-url`: the index serves only the
+      # fastfields projects, so fastfields-dlpack's own dependency
+      # (`packaging`) still has to come from PyPI. The `cpu/` lane is the only
+      # published one; CUDA lanes are deferred until a cu* wheel builds, and
+      # a CI runner has no GPU to use one on in any case.
+      #
       # pip *does* run `git submodule update --init --recursive` for a git+
-      # install, so this cross-repo source build works as long as the pinned
-      # submodule chain on fastfields-dlpack@main is healthy. Once the wheel
-      # index carries a release, prefer installing from there instead.
+      # install, so the fallback works as long as the pinned submodule chain
+      # on fastfields-dlpack@main is healthy -- which is exactly the fragility
+      # installing from the index removes.
+      #
       # For fastfields-dlpack itself this step is skipped (it IS dlpack); the
       # guard uses `github.repository`, which in a reusable workflow resolves
       # to the *calling* repo. `needs-dlpack: false` skips it everywhere.
-      - name: Install fastfields-dlpack from source
+      - name: Install fastfields-dlpack from the wheel index
         if: ${{ inputs.needs-dlpack && github.repository != 'fastfields/fastfields-dlpack' }}
-        run: pip install "fastfields-dlpack @ git+https://github.com/fastfields/fastfields-dlpack@main"
+        run: |
+          if pip install fastfields-dlpack \
+              --extra-index-url https://fastfields.github.io/whl/cpu/; then
+            echo "installed fastfields-dlpack from the wheel index"
+            exit 0
+          fi
+          echo "::warning::fastfields-dlpack could not be installed from" \
+               "https://fastfields.github.io/whl/cpu/ -- falling back to a" \
+               "git+ source build. Expected until the first release is" \
+               "published (whl#1); investigate the index if a release exists."
+          pip install "fastfields-dlpack @ git+https://github.com/fastfields/fastfields-dlpack@main"
       - name: Install package + test deps
         run: pip install ".[test]"
       - name: Run pytest
