@@ -11,9 +11,10 @@ name: Test
 #       secrets: inherit
 #
 # `secrets: inherit` lets the checkout pick up CI_SUBMODULE_TOKEN where a repo
-# defines it (fastfields-dlpack needs it for its C++ submodule chain); repos
-# without that secret fall back to the default token, which is fine for a
-# pure-Python checkout.
+# has it (fastfields-dlpack needs it for its C++ submodule chain); where it is
+# not set the checkout falls back to the default token, which is fine for a
+# pure-Python checkout. That fallback has to be written out as
+# `secrets.X || github.token` -- see the checkout step.
 #
 # The fastfields-dlpack install step is skipped automatically for
 # fastfields-dlpack itself, which *is* the dlpack package -- the guard keys off
@@ -80,7 +81,17 @@ jobs:
       - uses: actions/checkout@v5
         with:
           submodules: recursive
-          token: ${{ secrets.CI_SUBMODULE_TOKEN }}
+          # `|| github.token` is load-bearing, and its absence was a latent
+          # trap for any caller without CI_SUBMODULE_TOKEN: an unset secret
+          # interpolates to the empty string, and actions/checkout does NOT
+          # treat an empty `token:` as "use the default" -- it uses it, and
+          # the fetch dies with `could not read Username for
+          # 'https://github.com': terminal prompts disabled` before a single
+          # step of the job runs. Only fastfields-dlpack needs the secret (for
+          # its private C++ submodule chain); every other caller needs this
+          # fallback, and `fastfields` hit it the moment it stopped carrying
+          # its own bespoke copy of this job.
+          token: ${{ secrets.CI_SUBMODULE_TOKEN || github.token }}
           # versioningit derives the version from `git describe`, which needs
           # the tags -- a shallow (depth 1) checkout hides them and the version
           # silently falls back to "0+unknown".
