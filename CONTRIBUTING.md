@@ -6,19 +6,23 @@ JIT-compiled `jitfields`, dropping the cppyy/torchlib dependency: data crosses
 backends via **DLPack**, and the Python layer binds with **nanobind**.
 
 The project is spread across several repositories, each one layer of the stack,
-connected by git submodules:
+connected by git submodules.
+
+The **Python side is two distributions in two repos**: `fastfields-dlpack`
+(the compiled nanobind bindings) and `fastfields` -- which since fastfields#3
+ships `fastfields.{helpers,numpy,cupy,torch,auto}` as one pure-Python
+universal wheel, having absorbed what used to be `fastfields-helpers`,
+`fastfields-numpy`, `fastfields-cupy` and `fastfields-torch`. They are not
+layered: both ship PEP 420 subpackages of one `fastfields` namespace, and
+neither creates `fastfields/__init__.py`. `fastfields-dlpack` stays separate
+because it is the only thing in the stack needing a per-platform wheel matrix.
 
 ```
 fastfields-kernels        voxelwise math (header-only, backend-agnostic, templated)
   ├─ fastfields-cpu-impl   CPU loops over elements  ─ fastfields-cpu-lib   (libfastfields-cpu, dtype dispatch)  ┐
   └─ fastfields-cuda-impl  CUDA kernels + launchers ─ fastfields-cuda-lib  (libfastfields-cuda, nvcc)           ┴─ fastfields-lib (libfastfields, DLTensor, device dispatch)
                                                                                                                    └─ fastfields-bind-py (fastfields.dlpack, nanobind)
-                                                                                                                        ├─ fastfields-numpy / -cupy / -torch (fastfields.{numpy,cupy,torch})
-                                                                                                                        └─ fastfields             (fastfields.auto)
-
-fastfields-helpers  (fastfields.helpers -- pure-Python enums/normalisers, zero deps)
-  └─ consumed by fastfields-numpy / -cupy / -torch / fastfields, as an
-     independent sibling of fastfields-dlpack (neither depends on the other)
+                                                                                                                        └─ fastfields  (fastfields.{helpers,numpy,cupy,torch,auto})
 ```
 
 Each repo has a **`CLAUDE.md`** describing its role, layout, and conventions;
@@ -250,13 +254,15 @@ keeps one-line callers per package; we inline the steps for now — extract a
 - `lint.yaml` — `ruff check`, `ruff format --check`, `codespell` (push + PR).
 - `test.yaml` — a Python-version matrix: checkout `submodules: recursive`,
   install the package `.[test]`, run `pytest` from a neutral cwd. Path-filter on
-  `fastfields/**`, `tests/**`, `pyproject.toml`. Wrapper repos (numpy/torch/cupy)
-  and the umbrella `fastfields` repo need `fastfields-dlpack`; until it is on
-  PyPI / the wheel index they build it from the sibling repo. `fastfields-helpers`
-  is the one repo that needs neither — it is pure Python with zero dependencies
-  — so its `test.yaml` passes the reusable workflow's `needs-dlpack: false`
-  input to skip that build entirely (fastfields/.github#10) rather than
-  compiling the whole C++ chain to test stdlib-only code.
+  `fastfields/**`, `tests/**`, `pyproject.toml`. The `fastfields` repo needs
+  `fastfields-dlpack`, and the reusable workflow installs it **from the wheel
+  index** (`--extra-index-url https://fastfields.github.io/whl/cpu/`), falling
+  back to a `git+` source build with a `::warning::` while no release exists —
+  dogfooding the index is the only coverage it gets (fastfields#6). The
+  `needs-dlpack: false` input skips that install and the clang toolchain steps
+  it exists for; no caller needs it now that stdlib-only `fastfields-helpers`
+  has been absorbed, but it is kept because the cost of getting it wrong is an
+  hour of CI per push.
 - `docs.yaml` — build the site and deploy to Pages (`permissions: pages: write,
   id-token: write`, `concurrency: {group: pages}`).
 - C++ repos get a `test.yaml` too: the **cpu-lib** one (`make test
