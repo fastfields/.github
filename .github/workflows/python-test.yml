@@ -27,12 +27,20 @@ name: Test
 # runner image only has the Pythons that actions/python-versions publishes for
 # it. The two that bit this org:
 #
-#   * Ubuntu 26.04 exists as a runner image and `ubuntu-latest` is migrating
+#   * Ubuntu 26.04 exists as a runner image and `ubuntu-latest` has migrated
 #     onto it, but actions/python-versions publishes **no 3.9 build for
 #     26.04** (3.9.25, the newest 3.9, ships linux builds for 22.04 and 24.04
-#     only). So `ubuntu-latest` x 3.9 dies inside actions/setup-python before
-#     a single test runs -- and during a `-latest` migration it dies
-#     *intermittently*, because only some runs land on the new image.
+#     only). So `ubuntu-latest` x 3.9 -- a cell of the old DEFAULT matrix --
+#     dies inside actions/setup-python before a single test runs:
+#
+#         The version '3.9' with architecture 'x64' was not found for
+#         Ubuntu 26.04.
+#
+#     Observed on run 42051085520: `pytest (ubuntu-latest, 3.9)` fails at step
+#     3 in under two seconds while the other five legs pass with `76 passed`.
+#     `requires-python = ">=3.9"` across the distributions, so the answer is to
+#     pin that leg to an image that has 3.9, not to drop it: it is
+#     `ubuntu-22.04` below.
 #   * `macos-latest` is arm64 (macOS 26 Arm64 today), and the only darwin 3.9
 #     builds for arm64 are 3.9.12/3.9.13 -- two years of patches behind the
 #     3.9.25 that x64 gets. The x64 macOS labels are `macos-26-intel` /
@@ -71,9 +79,19 @@ name: Test
 #     fatal: could not read Username for 'https://github.com': terminal
 #     prompts disabled
 #
-# The token is gone. `secrets: inherit` in a caller is now unnecessary for
-# this workflow (harmless, and still needed by python-release.yml for
-# WHL_DISPATCH_TOKEN).
+# The token is gone, and so is `submodules: recursive`: fastfields-dlpack#34
+# replaced the `_fastfields_lib` submodule with a SHA in `fastfields-lib.sha`
+# that setup.py clones from the public repo at build time, so no caller of this
+# workflow has a submodule to check out any more.
+#
+# `secrets: inherit` in a caller is now unnecessary for this workflow. It is
+# harmless, but it is also what made the dead PAT reach the checkout, so a
+# caller that has dropped it (fastfields-dlpack has) is better off. Note
+# python-release.yml still needs it, for WHL_DISPATCH_TOKEN.
+#
+# One subtlety, since an empty token is not the same as an absent one: this is
+# `actions/checkout` with **no** `token:` input, which defaults to
+# `github.token`. It is not `token: ''`, which would authenticate as nobody.
 
 on:
   workflow_call:
@@ -422,16 +440,17 @@ jobs:
     steps:
       - uses: actions/checkout@v5
         with:
-          # fastfields-dlpack pins its C++ tree as a submodule. Every repo in
-          # that chain is public, so the default token clones it -- see the
-          # "No CI_SUBMODULE_TOKEN" note at the top. This line can go once
-          # fastfields-dlpack records a SHA and clones it at build time
-          # instead: there is then no submodule to check out, and this becomes
-          # a no-op for every caller.
-          submodules: recursive
+          # No `submodules:` and no `token:`. Not an omission -- see the "No
+          # CI_SUBMODULE_TOKEN" note at the top for the token, and
+          # fastfields-dlpack#34 for the submodule: `_fastfields_lib` is now a
+          # SHA recorded in `fastfields-lib.sha`, which setup.py clones from
+          # the public repo at build time. No caller of this workflow has a
+          # submodule left, so asking checkout to recurse would do nothing but
+          # imply otherwise.
+          #
           # versioningit derives the version from `git describe`, which needs
           # the tags -- a shallow (depth 1) checkout hides them and the version
-          # silently falls back to "0+unknown".
+          # silently falls back to "0+unknown". So this one stays.
           fetch-depth: 0
       - uses: actions/setup-python@v5
         with:

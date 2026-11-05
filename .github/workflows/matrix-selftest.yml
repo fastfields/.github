@@ -136,3 +136,36 @@ jobs:
           print(f'{platform.platform()}: python {sys.version.split()[0]}')
           assert got == want, f'asked for {want}, got {got}'
           "
+      - name: The callers' test dependencies resolve for this Python
+        # Provisioning an interpreter is necessary but not sufficient: a
+        # Python version is also only usable here if the array backends have
+        # wheels for it. 3.10 and 3.13 are new to the default matrix and no
+        # caller has run them yet, so resolving the gating dependencies is
+        # what keeps them from being an unproven widening pushed into six
+        # repos at once.
+        #
+        # `--dry-run` resolves and downloads nothing. This list mirrors what
+        # the callers' `[test]` extras pull (pytest + numpy + torch); it is a
+        # smoke list, not a contract -- the authority is each repo's
+        # pyproject.toml, and a drift here costs a false alarm, not a missed
+        # bug. `fastfields-dlpack` is deliberately absent: it is built from
+        # source by the real workflow, so pip's resolver has nothing to say
+        # about it.
+        #
+        # Informational on purpose. A backend that has not shipped a wheel for
+        # a new Python yet is a fact about that backend's release cadence, not
+        # a defect in this workflow, and it must not block a change to the
+        # matrix plumbing. It belongs in the log where whoever widens the
+        # matrix next will see it.
+        continue-on-error: true
+        run: |
+          python -m pip install --quiet --upgrade pip
+          if python -m pip install --dry-run --quiet pytest numpy torch; then
+            echo "pytest + numpy + torch resolve on python ${{ matrix.python }}"
+          else
+            echo "::warning::pytest/numpy/torch do NOT all resolve on" \
+                 "${{ matrix.os }} x python ${{ matrix.python }} -- that leg" \
+                 "will fail at 'Install package + test deps' in the real" \
+                 "workflow. Check which backend is missing a wheel before" \
+                 "keeping this pair in the default matrix."
+          fi
