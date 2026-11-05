@@ -54,9 +54,25 @@ name: Release
 # ---------------------------------------------------------------------------
 # Secrets (passed via `secrets: inherit`)
 # ---------------------------------------------------------------------------
-#   CI_SUBMODULE_TOKEN  - read access to the C++ submodule chain. Only
-#                         fastfields-dlpack needs it; elsewhere the checkout
-#                         falls back to the default token.
+# There is deliberately no submodule token, and no `submodules:` input. The
+# checkouts below used to pass CI_SUBMODULE_TOKEN "for private submodules".
+# Both halves of that are now false: every repo in the C++ chain is public, and
+# since fastfields-dlpack#34 there is no submodule at all -- `_fastfields_lib`
+# is a SHA in `fastfields-lib.sha` that setup.py clones at build time.
+#
+# The token was not merely redundant, it was fatal. The secret had expired, and
+# an expired secret is *set* rather than empty, so a `|| github.token` fallback
+# never fires: the checkout died with "could not read Username for
+# 'https://github.com'" before any build step. THIS WORKFLOW IS WHERE THAT
+# MATTERED MOST AND WAS NOTICED LEAST. A caller must keep `secrets: inherit`
+# here (the publish and wheel-index steps need GITHUB_TOKEN and
+# WHL_DISPATCH_TOKEN), so dropping the inherit at the caller -- which is what
+# unblocked `Test` for fastfields-dlpack -- could not help the release path.
+# The release path is also the least exercised one, so this would have
+# surfaced for the first time during an actual release.
+#
+# `fetch-depth: 0` stays on every checkout: versioningit needs the tags.
+#
 #   WHL_DISPATCH_TOKEN  - fine-grained PAT with `contents: write` on
 #                         fastfields/whl. The default GITHUB_TOKEN is scoped to
 #                         the *calling* repo and cannot fire a workflow in
@@ -186,8 +202,8 @@ jobs:
       - uses: actions/checkout@v5
         with:
           ref: ${{ inputs.tag }}
-          submodules: recursive     # _fastfields_lib + its own submodules
-          token: ${{ secrets.CI_SUBMODULE_TOKEN }}
+          # No submodules: fastfields-dlpack#34 made _fastfields_lib a SHA in
+          # `fastfields-lib.sha` that setup.py clones at build time.
           fetch-depth: 0            # versioningit needs the tag
       - name: Build libfastfields + libfastfields-cpu (manylinux container)
         if: runner.os == 'Linux'
@@ -256,8 +272,8 @@ jobs:
       - uses: actions/checkout@v5
         with:
           ref: ${{ inputs.tag }}
-          submodules: recursive     # _fastfields_lib + its own submodules
-          token: ${{ secrets.CI_SUBMODULE_TOKEN }}
+          # No submodules: fastfields-dlpack#34 made _fastfields_lib a SHA in
+          # `fastfields-lib.sha` that setup.py clones at build time.
           fetch-depth: 0            # versioningit needs the tag
       # Downloaded to a fixed path under the checkout root so it lands inside
       # cibuildwheel's /project mount; FASTFIELDS_PREBUILT_LIB below points

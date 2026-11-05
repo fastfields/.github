@@ -1,20 +1,15 @@
 name: Test
 
-# Reusable test workflow shared by the fastfields Python packages. Since
-# fastfields#3 merged the four wrapper distributions into `fastfields`, the
-# callers are `fastfields` (which ships fastfields.{helpers,numpy,cupy,torch,
-# auto}) and `fastfields-dlpack`. Call it from a repo with:
+# Reusable test workflow shared by the fastfields Python packages. Call it
+# from a repo with:
 #
 #   jobs:
 #     pytest:
 #       uses: fastfields/.github/.github/workflows/python-test.yml@main
-#       secrets: inherit
 #
-# `secrets: inherit` is what lets the checkout reach CI_SUBMODULE_TOKEN, which
-# fastfields-dlpack needs for its C++ submodule chain. Only that repo gets it:
-# every other caller checks out with the default token, deliberately -- see the
-# checkout step for why passing the secret to a repo that does not need it is
-# actively harmful.
+# Nothing has to be passed: the default matrix below is a list of explicit
+# (runner image, Python) pairs that are known to exist. A repo that needs a
+# different set overrides `matrix-include`.
 #
 # The fastfields-dlpack install step is skipped automatically for
 # fastfields-dlpack itself, which *is* the dlpack package -- the guard keys off
@@ -23,18 +18,108 @@ name: Test
 # A repo that does not depend on fastfields-dlpack at all passes
 # `needs-dlpack: false`, which skips both that install *and* the C++ toolchain
 # steps that exist only to serve it -- see the input's description below.
+#
+# ---------------------------------------------------------------------------
+# Why the matrix is a list of pairs and not two axes
+# ---------------------------------------------------------------------------
+# It used to be `os` x `python-versions`, and a cross product is the wrong
+# shape for this problem: most of the cells it generates cannot run, because a
+# runner image only has the Pythons that actions/python-versions publishes for
+# it. The two that bit this org:
+#
+#   * Ubuntu 26.04 exists as a runner image and `ubuntu-latest` has migrated
+#     onto it, but actions/python-versions publishes **no 3.9 build for
+#     26.04** (3.9.25, the newest 3.9, ships linux builds for 22.04 and 24.04
+#     only). So `ubuntu-latest` x 3.9 -- a cell of the old DEFAULT matrix --
+#     dies inside actions/setup-python before a single test runs:
+#
+#         The version '3.9' with architecture 'x64' was not found for
+#         Ubuntu 26.04.
+#
+#     Observed on run 42051085520: `pytest (ubuntu-latest, 3.9)` fails at step
+#     3 in under two seconds while the other five legs pass with `76 passed`.
+#     `requires-python = ">=3.9"` across the distributions, so the answer is to
+#     pin that leg to an image that has 3.9, not to drop it: it is
+#     `ubuntu-22.04` below.
+#   * `macos-latest` is arm64 (macOS 26 Arm64 today), and the only darwin 3.9
+#     builds for arm64 are 3.9.12/3.9.13 -- two years of patches behind the
+#     3.9.25 that x64 gets. The x64 macOS labels are `macos-26-intel` /
+#     `macos-latest-large`; `macos-13` and `macos-14` are retired.
+#
+# An explicit `include:` list cannot generate an impossible cell, which is the
+# point. Each pair below was checked against actions/python-versions'
+# versions-manifest.json, and the `plan` job re-checks every pair on every run
+# so the next image migration fails with an explanation instead of a
+# setup-python stack trace.
+#
+# Images are pinned rather than spelled `-latest`, for the reason above: a
+# `-latest` label moves under a pinned Python. The one deliberate
+# `ubuntu-latest` leg is a canary -- it carries a Python that every current
+# and next image publishes, so it reports an image migration without being
+# broken by one.
+#
+# macOS is not in the default matrix. The org's macOS runners do not pick
+# these jobs up (legs sat queued and were cancelled at 15 minutes), and the
+# pure-Python distributions have no platform-specific content: the Python axis
+# is what finds bugs, and the platform axis belongs to fastfields-dlpack,
+# where the compiled artifacts are. A caller that wants a macOS leg can add
+# one to `matrix-include`; the `plan` job knows the label -> (darwin, arch)
+# mapping and will check the pair.
+#
+# ---------------------------------------------------------------------------
+# No CI_SUBMODULE_TOKEN
+# ---------------------------------------------------------------------------
+# The checkout step used to pass CI_SUBMODULE_TOKEN for fastfields-dlpack, for
+# "private submodules". That was true when it was written and is not true now:
+# every fastfields repo in the submodule chain is public, and a credential-free
+# clone of fastfields-lib succeeds. The secret then expired, and because an
+# expired secret is *set* rather than empty, the `|| github.token` fallback
+# never fired -- so every Python CI leg died at `actions/checkout` in 35s with
+#
+#     fatal: could not read Username for 'https://github.com': terminal
+#     prompts disabled
+#
+# The token is gone, and so is `submodules: recursive`: fastfields-dlpack#34
+# replaced the `_fastfields_lib` submodule with a SHA in `fastfields-lib.sha`
+# that setup.py clones from the public repo at build time, so no caller of this
+# workflow has a submodule to check out any more.
+#
+# `secrets: inherit` in a caller is now unnecessary for this workflow. It is
+# harmless, but it is also what made the dead PAT reach the checkout, so a
+# caller that has dropped it (fastfields-dlpack has) is better off. Note
+# python-release.yml still needs it, for WHL_DISPATCH_TOKEN.
+#
+# One subtlety, since an empty token is not the same as an absent one: this is
+# `actions/checkout` with **no** `token:` input, which defaults to
+# `github.token`. It is not `token: ''`, which would authenticate as nobody.
 
 on:
   workflow_call:
     inputs:
+      matrix-include:
+        description: >-
+          JSON array of explicit matrix entries, each an object with an `os`
+          (runner label) and a `python` (version for actions/setup-python):
+          '[{"os": "ubuntu-24.04", "python": "3.11"}]'. Empty means the
+          default list in the `plan` job below. Prefer this over the legacy
+          `os`/`python-versions` cross product: a pair list cannot generate a
+          (image, Python) combination that does not exist.
+        type: string
+        default: ''
       os:
-        description: "JSON array of runner OSes for the matrix"
+        description: >-
+          Legacy. JSON array of runner labels, cross-producted with
+          `python-versions`. Kept so existing callers keep working; new
+          overrides should use `matrix-include`, because a cross product can
+          generate cells that no runner image can serve. Every generated pair
+          is verified like any other, so a bad combination fails in `plan`
+          with an explanation rather than in setup-python.
         type: string
-        default: '["ubuntu-latest", "macos-latest"]'
+        default: ''
       python-versions:
-        description: "JSON array of Python versions for the matrix"
+        description: "Legacy. JSON array of Python versions; see `os`."
         type: string
-        default: '["3.9", "3.11", "3.12"]'
+        default: ''
       needs-dlpack:
         description: >-
           Whether this package needs fastfields-dlpack installed to run its
@@ -51,6 +136,18 @@ on:
           kept because the cost of getting it wrong is an hour of CI per push.
         type: boolean
         default: true
+      verify-matrix:
+        description: >-
+          Check every planned (image, Python) pair against
+          actions/python-versions' manifest before spending runners on it.
+          Leave it on: it is one HTTPS request, and it is the difference
+          between "3.9 is not published for Ubuntu 26.04" and a setup-python
+          failure on a leg that looks unrelated. A manifest that cannot be
+          fetched is a warning, not a failure, so this never blocks on
+          raw.githubusercontent being down; set it to false only to silence
+          the check entirely.
+        type: boolean
+        default: true
 
 permissions:
   contents: read
@@ -63,13 +160,276 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # Resolve the matrix once, in one place, and check it before spending
+  # runners on it. Cheap (no checkout, no installs) and it is what keeps the
+  # "which Pythons exist on which image" knowledge from being re-derived by
+  # hand in six repos.
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      include: ${{ steps.plan.outputs.include }}
+    steps:
+      - name: Resolve and verify the (image, Python) matrix
+        id: plan
+        env:
+          MATRIX_INCLUDE: ${{ inputs.matrix-include }}
+          LEGACY_OS: ${{ inputs.os }}
+          LEGACY_PYTHONS: ${{ inputs.python-versions }}
+          VERIFY: ${{ inputs.verify-matrix }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import sys
+          import urllib.error
+          import urllib.request
+
+          MANIFEST = (
+              "https://raw.githubusercontent.com/actions/python-versions"
+              "/main/versions-manifest.json"
+          )
+
+          # The default matrix: four distinct Ubuntu images, five Pythons,
+          # every pair published by actions/python-versions. `requires-python
+          # = ">=3.9"` across the distributions, so 3.9 has to stay covered --
+          # on an image that actually has it.
+          DEFAULT = [
+              # The declared floor. 22.04 and 24.04 are the only images with a
+              # current 3.9 (3.9.25); 22.04 is the older of the two, so this
+              # leg also covers the oldest toolchain the project claims.
+              {"os": "ubuntu-22.04", "python": "3.9"},
+              {"os": "ubuntu-24.04", "python": "3.10"},
+              {"os": "ubuntu-24.04", "python": "3.11"},
+              {"os": "ubuntu-26.04", "python": "3.12"},
+              # Canary for the `-latest` migration: 3.13 is published for
+              # 22.04, 24.04 and 26.04, so this leg runs on whichever image
+              # `ubuntu-latest` resolves to today, and goes red when a *new*
+              # image lands without the Pythons we use. That is the signal the
+              # old `ubuntu-latest` x 3.9 cell was giving -- except there it
+              # was indistinguishable from a real test failure.
+              {"os": "ubuntu-latest", "python": "3.13"},
+          ]
+
+          def load(name, raw):
+              raw = (raw or "").strip()
+              if not raw:
+                  return None
+              try:
+                  return json.loads(raw)
+              except ValueError as exc:
+                  sys.exit(f"::error::input `{name}` is not valid JSON: {exc}")
+
+          include = load("matrix-include", os.environ.get("MATRIX_INCLUDE"))
+          legacy_os = load("os", os.environ.get("LEGACY_OS"))
+          legacy_py = load("python-versions", os.environ.get("LEGACY_PYTHONS"))
+
+          if include is not None and (legacy_os or legacy_py):
+              sys.exit(
+                  "::error::pass either `matrix-include` or the legacy "
+                  "`os`/`python-versions` pair, not both"
+              )
+
+          if include is None and (legacy_os or legacy_py):
+              # Legacy cross product. Either axis alone falls back to the
+              # default's distinct values for the other, so a caller that
+              # overrides one knob does not silently lose the other.
+              oses = legacy_os or sorted({e["os"] for e in DEFAULT})
+              pys = legacy_py or sorted({e["python"] for e in DEFAULT})
+              include = [{"os": o, "python": p} for o in oses for p in pys]
+              print(
+                  "::notice::built a %d-cell cross product from the legacy "
+                  "`os`/`python-versions` inputs; `matrix-include` states the "
+                  "pairs directly and cannot generate a cell no image serves"
+                  % len(include)
+              )
+
+          if include is None:
+              include = DEFAULT
+
+          if not isinstance(include, list) or not include:
+              sys.exit("::error::the resolved matrix is empty")
+
+          normalised = []
+          for entry in include:
+              if not isinstance(entry, dict):
+                  sys.exit(
+                      f"::error::matrix entry {entry!r} is not an object with "
+                      "`os` and `python`"
+                  )
+              # `python-version` is accepted as a spelling of `python`, so an
+              # include list written either way works.
+              py = entry.get("python", entry.get("python-version"))
+              if not entry.get("os") or not py:
+                  sys.exit(
+                      f"::error::matrix entry {entry!r} needs both `os` and "
+                      "`python`"
+                  )
+              normalised.append({**entry, "python": str(py)})
+          include = normalised
+
+          # --------------------------------------------------------------- #
+          # Verify each pair against actions/python-versions                #
+          # --------------------------------------------------------------- #
+          # setup-python resolves a version spec against that manifest,
+          # filtered by the runner's (platform, platform_version, arch). A
+          # pair the manifest does not cover cannot work, whatever the image
+          # has installed, because the tool cache is built from the manifest.
+          def runner_platform(label):
+              """(platform, platform_version, arch) for a runner label."""
+              low = label.lower()
+              arch = "arm64" if low.endswith(("-arm", "-arm64")) else "x64"
+              if low.startswith("ubuntu"):
+                  stem = low[len("ubuntu-"):]
+                  for suffix in ("-arm64", "-arm"):
+                      if stem.endswith(suffix):
+                          stem = stem[: -len(suffix)]
+                  if stem in ("latest", "slim", ""):
+                      # Resolve `-latest` from the image this job is running
+                      # on: it is the same label, so it is the best available
+                      # answer. It can still move between this job and the
+                      # test legs mid-migration, hence the notice below.
+                      version = ""
+                      with open("/etc/os-release") as handle:
+                          for line in handle:
+                              if line.startswith("VERSION_ID="):
+                                  version = line.split("=", 1)[1].strip('" \n')
+                      return "linux", version, arch
+                  return "linux", stem, arch
+              if low.startswith("macos"):
+                  # macos-latest / macos-NN / macos-NN-xlarge are arm64; the
+                  # x64 labels carry -intel or -large.
+                  intel = "-intel" in low or "-large" in low
+                  return "darwin", "", "x64" if intel else "arm64"
+              if low.startswith("windows"):
+                  return "win32", "", arch
+              return "", "", arch
+
+          def stable_releases(minor):
+              return [
+                  release
+                  for release in manifest
+                  if release.get("stable")
+                  and release["version"].startswith(minor + ".")
+              ]
+
+          def published(minor, platform, platform_version, arch):
+              """Patch versions of `minor` published for that platform."""
+              found = []
+              for release in stable_releases(minor):
+                  for f in release["files"]:
+                      if (
+                          f["platform"] == platform
+                          and f.get("platform_version", "") == platform_version
+                          and f["arch"] == arch
+                      ):
+                          found.append(release["version"])
+                          break
+              return found
+
+          verify = os.environ.get("VERIFY", "true").lower() == "true"
+          manifest = None
+          if verify:
+              try:
+                  with urllib.request.urlopen(MANIFEST, timeout=30) as resp:
+                      manifest = json.load(resp)
+              except (urllib.error.URLError, ValueError, OSError) as exc:
+                  print(
+                      "::warning::could not fetch the actions/python-versions "
+                      f"manifest ({exc}); skipping the availability check"
+                  )
+
+          problems = []
+          if manifest:
+              rows = ["| image | python | resolves to |", "| --- | --- | --- |"]
+              for entry in include:
+                  label, minor = entry["os"], entry["python"]
+                  platform, platform_version, arch = runner_platform(label)
+                  if not platform:
+                      print(
+                          f"::warning::unknown runner label {label!r}; cannot "
+                          "check which Pythons it publishes"
+                      )
+                      continue
+                  # A full `X.Y.Z`, or a spec like `3.x`, is the caller's
+                  # business; only a bare minor can be checked this way.
+                  if minor.count(".") != 1 or not all(
+                      part.isdigit() for part in minor.split(".")
+                  ):
+                      print(
+                          f"::warning::{label} x {minor}: not a bare `X.Y`, "
+                          "so it is passed through unchecked"
+                      )
+                      continue
+                  where = platform + (
+                      "-" + platform_version if platform_version else ""
+                  ) + "/" + arch
+                  avail = published(minor, platform, platform_version, arch)
+                  if not avail:
+                      elsewhere = sorted(
+                          {
+                              f["platform"]
+                              + (
+                                  "-" + f["platform_version"]
+                                  if f.get("platform_version")
+                                  else ""
+                              )
+                              + "/"
+                              + f["arch"]
+                              for release in stable_releases(minor)
+                              for f in release["files"]
+                              if "freethreaded" not in f["arch"]
+                          }
+                      )
+                      problems.append(
+                          f"{label} x Python {minor}: actions/python-versions "
+                          f"publishes no {minor} build for {where}. It does "
+                          f"publish {minor} for: "
+                          f"{', '.join(elsewhere) or 'nothing'}"
+                      )
+                      continue
+                  best = avail[0]
+                  newest = stable_releases(minor)[0]["version"]
+                  rows.append(f"| `{label}` | {minor} | {best} ({where}) |")
+                  if best != newest:
+                      print(
+                          f"::warning::{label} x {minor} resolves to {best}, "
+                          f"but {newest} is the newest {minor}: this platform "
+                          "stopped getting patches for it. Pair this Python "
+                          "with an image/arch that still publishes it."
+                      )
+                  if label.lower().endswith("latest"):
+                      print(
+                          f"::notice::{label} is not pinned; it resolved to "
+                          f"{where} for this job, and can move under the test "
+                          "legs during an image migration"
+                      )
+              summary = os.environ.get("GITHUB_STEP_SUMMARY")
+              if summary and len(rows) > 2:
+                  with open(summary, "a") as handle:
+                      handle.write("### Planned matrix\n\n")
+                      handle.write("\n".join(rows) + "\n")
+
+          if problems:
+              for problem in problems:
+                  print(f"::error::{problem}")
+              sys.exit(
+                  "refusing to start a matrix with "
+                  f"{len(problems)} impossible cell(s)"
+              )
+
+          print(f"planned {len(include)} leg(s): {json.dumps(include)}")
+          with open(os.environ["GITHUB_OUTPUT"], "a") as handle:
+              handle.write("include=" + json.dumps(include) + "\n")
+          PY
+
   pytest:
+    needs: plan
+    name: pytest (${{ matrix.os }}, py${{ matrix.python }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        os: ${{ fromJSON(inputs.os) }}
-        python-version: ${{ fromJSON(inputs.python-versions) }}
+        include: ${{ fromJSON(needs.plan.outputs.include) }}
     # The C++ build that fastfields-dlpack needs is driven by clang++ on every
     # OS; the per-OS steps below make sure a clang++ is on PATH.
     env:
@@ -80,37 +440,21 @@ jobs:
     steps:
       - uses: actions/checkout@v5
         with:
-          submodules: recursive
-          # CI_SUBMODULE_TOKEN goes ONLY to the one repo that needs it.
-          # fastfields-dlpack needs it to clone its C++ submodule chain; no
-          # other caller has a submodule at all, and handing them a PAT they
-          # do not need makes their checkout fail whenever that PAT is stale
-          # -- which it currently is. Observed: six matrix legs of
-          # fastfields/fastfields dying in 35s at `actions/checkout` with
+          # No `submodules:` and no `token:`. Not an omission -- see the "No
+          # CI_SUBMODULE_TOKEN" note at the top for the token, and
+          # fastfields-dlpack#34 for the submodule: `_fastfields_lib` is now a
+          # SHA recorded in `fastfields-lib.sha`, which setup.py clones from
+          # the public repo at build time. No caller of this workflow has a
+          # submodule left, so asking checkout to recurse would do nothing but
+          # imply otherwise.
           #
-          #     fatal: could not read Username for 'https://github.com':
-          #     terminal prompts disabled
-          #
-          # as soon as that repo dropped its own bespoke copy of this job and
-          # started inheriting the org-level secret through `secrets:
-          # inherit`. A plain `secrets.X || github.token` does NOT save them:
-          # the secret is set, just not usable, so the fallback never fires.
-          # `github.repository` resolves to the *calling* repo here, the same
-          # way the dlpack install step below uses it.
-          #
-          # Expression semantics, since the precedence is easy to misread:
-          # when the repo does not match, `A && B` is false and the whole
-          # expression is `github.token`; when it matches but the secret is
-          # empty, `A && B` is the empty string, which is falsy, so it is
-          # `github.token` again. Either way checkout gets a usable token.
-          token: ${{ github.repository == 'fastfields/fastfields-dlpack' && secrets.CI_SUBMODULE_TOKEN || github.token }}
           # versioningit derives the version from `git describe`, which needs
           # the tags -- a shallow (depth 1) checkout hides them and the version
-          # silently falls back to "0+unknown".
+          # silently falls back to "0+unknown". So this one stays.
           fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
-          python-version: ${{ matrix.python-version }}
+          python-version: ${{ matrix.python }}
           # Cache the pip download/wheel dir, keyed on the resolved deps in
           # pyproject.toml, so repeat installs of numpy/torch/... are fast.
           cache: "pip"
@@ -121,7 +465,20 @@ jobs:
       # A `needs-dlpack: false` caller compiles nothing, so they are skipped.
       - name: Install build toolchain (Linux)
         if: ${{ inputs.needs-dlpack && runner.os == 'Linux' }}
-        run: sudo apt-get update && sudo apt-get install -y clang
+        # Every Ubuntu runner image ships clang, so the normal path touches no
+        # package manager at all. That is deliberate: four jobs in this org
+        # have been killed at their `timeout-minutes` inside `apt-get` during
+        # a mirror stall, and the one that survived was the one that installs
+        # nothing. apt stays as a fallback for an image that turns out not to
+        # have clang, where the alternative is a confusing compile failure.
+        run: |
+          if command -v clang++ >/dev/null 2>&1; then
+            clang++ --version
+            exit 0
+          fi
+          echo "::warning::clang++ is not preinstalled on this image" \
+               "(${ImageOS:-unknown}); falling back to apt-get"
+          sudo apt-get update && sudo apt-get install -y clang
       - name: Install build toolchain (macOS)
         if: ${{ inputs.needs-dlpack && runner.os == 'macOS' }}
         # clang++ ships with the Xcode Command Line Tools, already present on

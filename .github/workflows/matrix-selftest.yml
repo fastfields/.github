@@ -1,0 +1,171 @@
+name: Matrix selftest
+
+# Proves that `python-test.yml`'s matrix can actually run, instead of merely
+# looking right. A matrix that looks right is what was already there: the
+# shared default was `["ubuntu-latest", "macos-latest"]` x
+# `["3.9", "3.11", "3.12"]`, which reads as reasonable and cannot be
+# provisioned -- actions/python-versions publishes no 3.9 for Ubuntu 26.04,
+# and the macOS legs were never picked up by this org's runners.
+#
+# Two jobs, and the second is the one that matters:
+#
+#   plan       -- runs the *real* planner, lifted out of python-test.yml so
+#                 there is one copy of it, against the live
+#                 actions/python-versions manifest. Also asserts that the old
+#                 broken default is still rejected, so the guard cannot rot
+#                 into a no-op.
+#   provision  -- for every planned (image, Python) pair, actually gets a
+#                 runner of that image and asks actions/setup-python for that
+#                 Python. Nothing else: no checkout of a package, no compile,
+#                 no apt. If this is green, the matrix in python-test.yml is
+#                 runnable, which is the one claim a reader cannot check by
+#                 reading.
+#
+# It does not test the package steps of python-test.yml -- this repo has no
+# package. Those are exercised by the real callers.
+
+on:
+  push:
+    paths:
+      - ".github/workflows/python-test.yml"
+      - ".github/workflows/matrix-selftest.yml"
+  pull_request:
+    paths:
+      - ".github/workflows/python-test.yml"
+      - ".github/workflows/matrix-selftest.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      include: ${{ steps.plan.outputs.include }}
+    steps:
+      - uses: actions/checkout@v5
+      - name: Lift the planner out of python-test.yml
+        # Extracted rather than copied: a second copy of the default matrix
+        # would be the first thing to go stale, and then this workflow would
+        # be proving a matrix nobody runs.
+        #
+        # Done with a line scan over the raw file rather than a YAML parse, so
+        # this step installs nothing at all -- no pip, no apt. The heredoc is
+        # indented by the YAML block scalar; dedenting by the opening line's
+        # indentation gives back exactly the script the `plan` job runs.
+        run: |
+          python3 - <<'PY'
+          import pathlib
+
+          source = pathlib.Path(".github/workflows/python-test.yml")
+          lines = source.read_text().splitlines()
+          start = None
+          for index, line in enumerate(lines):
+              if line.strip() == "python3 - <<'PY'":
+                  start = index
+                  break
+          if start is None:
+              raise SystemExit(
+                  "could not find the planner heredoc in python-test.yml -- "
+                  "if that step was restructured, update this extraction"
+              )
+          indent = len(lines[start]) - len(lines[start].lstrip())
+          body = []
+          for line in lines[start + 1:]:
+              if line.strip() == "PY":
+                  break
+              body.append(line[indent:] if line.strip() else "")
+          else:
+              raise SystemExit("the planner heredoc is not terminated")
+          pathlib.Path("planner.py").write_text("\n".join(body) + "\n")
+          print(f"extracted {len(body)} lines")
+          PY
+          python3 -c "import ast; ast.parse(open('planner.py').read())"
+      - name: The old default must still be rejected
+        # The regression this whole change is about. If the availability
+        # check ever stops catching `ubuntu-latest` x 3.9, it is not
+        # protecting anything, and this is how we find out.
+        env:
+          LEGACY_OS: '["ubuntu-latest", "macos-latest"]'
+          LEGACY_PYTHONS: '["3.9", "3.11", "3.12"]'
+        run: |
+          if python3 planner.py > old-default.log 2>&1; then
+            echo "::error::the planner accepted the old default matrix" \
+                 "(ubuntu-latest x 3.9); the availability check is not" \
+                 "catching an impossible cell any more"
+            cat old-default.log
+            exit 1
+          fi
+          grep -q "publishes no 3.9 build" old-default.log || {
+            echo "::error::the planner rejected the old default, but not for" \
+                 "the expected reason:"
+            cat old-default.log
+            exit 1
+          }
+          echo "rejected as expected:"
+          cat old-default.log
+      - name: Plan the default matrix
+        id: plan
+        run: python3 planner.py
+
+  provision:
+    needs: plan
+    name: provision (${{ matrix.os }}, py${{ matrix.python }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.plan.outputs.include) }}
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: The runner gave us the Python the matrix asked for
+        env:
+          WANT: ${{ matrix.python }}
+        run: |
+          python -c "
+          import os, platform, sys
+          want = os.environ['WANT']
+          got = '%d.%d' % sys.version_info[:2]
+          print(f'{platform.platform()}: python {sys.version.split()[0]}')
+          assert got == want, f'asked for {want}, got {got}'
+          "
+      - name: The callers' test dependencies resolve for this Python
+        # Provisioning an interpreter is necessary but not sufficient: a
+        # Python version is also only usable here if the array backends have
+        # wheels for it. 3.10 and 3.13 are new to the default matrix and no
+        # caller has run them yet, so resolving the gating dependencies is
+        # what keeps them from being an unproven widening pushed into six
+        # repos at once.
+        #
+        # `--dry-run` resolves and downloads nothing. This list mirrors what
+        # the callers' `[test]` extras pull (pytest + numpy + torch); it is a
+        # smoke list, not a contract -- the authority is each repo's
+        # pyproject.toml, and a drift here costs a false alarm, not a missed
+        # bug. `fastfields-dlpack` is deliberately absent: it is built from
+        # source by the real workflow, so pip's resolver has nothing to say
+        # about it.
+        #
+        # Informational on purpose. A backend that has not shipped a wheel for
+        # a new Python yet is a fact about that backend's release cadence, not
+        # a defect in this workflow, and it must not block a change to the
+        # matrix plumbing. It belongs in the log where whoever widens the
+        # matrix next will see it.
+        continue-on-error: true
+        run: |
+          python -m pip install --quiet --upgrade pip
+          if python -m pip install --dry-run --quiet pytest numpy torch; then
+            echo "pytest + numpy + torch resolve on python ${{ matrix.python }}"
+          else
+            echo "::warning::pytest/numpy/torch do NOT all resolve on" \
+                 "${{ matrix.os }} x python ${{ matrix.python }} -- that leg" \
+                 "will fail at 'Install package + test deps' in the real" \
+                 "workflow. Check which backend is missing a wheel before" \
+                 "keeping this pair in the default matrix."
+          fi
