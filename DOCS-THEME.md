@@ -22,6 +22,32 @@ not part of the shared branch or this theme.
 The other three publish into the **`gh-pages` branch of
 `fastfields.github.io`**, which is what Pages serves.
 
+## Credentials
+
+`fastfields.github.io` publishes its own site root, so the workflow's default
+`GITHUB_TOKEN` is enough there (`--auth token`).
+
+The other three push into a repo that is not their own, where `GITHUB_TOKEN`
+does not reach. They use **`DOCS_DEPLOY_KEY`**, an organization secret scoped
+to `fastfields`, `fastfields-lib` and `fastfields-dlpack`: the private half of
+an **SSH deploy key** whose public half is registered on `fastfields.github.io`
+with write access. So:
+
+- the remote is **`git@github.com:fastfields/fastfields.github.io.git`**, over
+  SSH — an `https://x-access-token:...@github.com/...` remote will *not*
+  authenticate with a deploy key;
+- the key is written to a mode-600 file and used via `GIT_SSH_COMMAND`, which
+  keeps a third-party action out of the deploy path;
+- a deploy key authenticates **as the repository, not as a user**, so the
+  commit identity is set explicitly to
+  `fastfields-docs-bot <noreply@github.com>`, or the commit has no usable
+  author.
+
+The script checks the secret is non-empty **before doing any work** and exits 1
+with one line naming `DOCS_DEPLOY_KEY` and the three repos it must be visible
+to. A deploy key cannot expire, but it can be revoked or scoped wrong, and this
+project has already lost weeks to a credential that stopped working silently.
+
 ## The invariant
 
 > **A publisher writes only its own subtree.**
@@ -112,9 +138,9 @@ links and sitemap point at pages that do not exist.
 2. Copy `tools/publish-docs.sh` from any existing publisher, unchanged.
 3. Add a `docs.yaml` that builds and then runs
    `./tools/publish-docs.sh --subdir <name> --site site`.
-4. Give it `DOCS_DEPLOY_TOKEN` — `contents: write` on `fastfields.github.io`
-   and nothing else. The default `GITHUB_TOKEN` is scoped to the calling repo
-   and cannot push there.
+4. Make sure the `DOCS_DEPLOY_KEY` organization secret is scoped to it, and
+   invoke the script with `--auth ssh`. The default `GITHUB_TOKEN` cannot be
+   used: it is scoped to the repo it runs in.
 5. Add the subtree's name to `OTHERS` in the **root** publisher's copy of the
    script, so the root deploy stops deleting it.
 
