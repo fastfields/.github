@@ -252,9 +252,18 @@ keeps one-line callers per package; we inline the steps for now — extract a
 `fastfields/actions` repo later if the duplication bites):
 
 - `lint.yaml` — `ruff check`, `ruff format --check`, `codespell` (push + PR).
-- `test.yaml` — a Python-version matrix: checkout `submodules: recursive`,
-  install the package `.[test]`, run `pytest` from a neutral cwd. Path-filter on
-  `fastfields/**`, `tests/**`, `pyproject.toml`. The `fastfields` repo needs
+- `test.yaml` — one line calling the reusable `python-test.yml`, which installs
+  the package `.[test]` and runs `pytest` from a neutral cwd. Path-filter on
+  `fastfields/**`, `tests/**`, `pyproject.toml`. Its matrix is an explicit list
+  of **(runner image, Python) pairs**, not an `os` x `python-versions` cross
+  product: a runner image only has the Pythons `actions/python-versions`
+  publishes for it, so a cross product generates cells that cannot run — the
+  `ubuntu-latest` x 3.9 cell has no 3.9 build on Ubuntu 26.04 at all. Override
+  the pairs per repo with `matrix-include`; the workflow checks every pair
+  against the manifest before spending a runner on it, and
+  `matrix-selftest.yml` in this repo provisions each default pair for real. No
+  secret is passed to the checkout: every repo in the C++ submodule chain is
+  public. The `fastfields` repo needs
   `fastfields-dlpack`, and the reusable workflow installs it **from the wheel
   index** (`--extra-index-url https://fastfields.github.io/whl/cpu/`), falling
   back to a `git+` source build with a `::warning::` while no release exists —

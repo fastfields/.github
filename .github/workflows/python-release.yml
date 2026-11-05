@@ -54,9 +54,13 @@ name: Release
 # ---------------------------------------------------------------------------
 # Secrets (passed via `secrets: inherit`)
 # ---------------------------------------------------------------------------
-#   CI_SUBMODULE_TOKEN  - read access to the C++ submodule chain. Only
-#                         fastfields-dlpack needs it; elsewhere the checkout
-#                         falls back to the default token.
+# There is deliberately no submodule token. The checkouts below used to pass
+# CI_SUBMODULE_TOKEN "for private submodules"; every repo in the C++ chain is
+# public, so the default token clones them, and the secret had expired -- an
+# expired secret is set rather than empty, so a `|| github.token` fallback
+# never fires and the checkout just dies with "could not read Username for
+# 'https://github.com'".
+#
 #   WHL_DISPATCH_TOKEN  - fine-grained PAT with `contents: write` on
 #                         fastfields/whl. The default GITHUB_TOKEN is scoped to
 #                         the *calling* repo and cannot fire a workflow in
@@ -187,7 +191,6 @@ jobs:
         with:
           ref: ${{ inputs.tag }}
           submodules: recursive     # _fastfields_lib + its own submodules
-          token: ${{ secrets.CI_SUBMODULE_TOKEN }}
           fetch-depth: 0            # versioningit needs the tag
       - name: Build libfastfields + libfastfields-cpu (manylinux container)
         if: runner.os == 'Linux'
@@ -257,7 +260,6 @@ jobs:
         with:
           ref: ${{ inputs.tag }}
           submodules: recursive     # _fastfields_lib + its own submodules
-          token: ${{ secrets.CI_SUBMODULE_TOKEN }}
           fetch-depth: 0            # versioningit needs the tag
       # Downloaded to a fixed path under the checkout root so it lands inside
       # cibuildwheel's /project mount; FASTFIELDS_PREBUILT_LIB below points
