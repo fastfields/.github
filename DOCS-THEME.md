@@ -22,6 +22,24 @@ not part of the shared branch or this theme.
 The other three publish into the **`gh-pages` branch of
 `fastfields.github.io`**, which is what Pages serves.
 
+## Who writes the documentation
+
+**All documentation in this project is written by Sonnet agents** — docstrings
+and Markdown alike. Not Opus, not Fable. Any other agent may change structure,
+configuration, checks and build files, and may *delete* prose, but it does not
+write or rewrite documentation text.
+
+The rules for the agent that does write it:
+
+- **It must be good English**: technical, exact, and pleasant to read.
+- **Length follows the topic** — sometimes a paragraph, sometimes several
+  pages, always a reasonable length for what is being explained. Padding and
+  truncation are both defects.
+- **A rewrite is a rewrite, not an edit.** To redo an existing passage, take
+  its core message, drop the existing wording, and write the passage again
+  from that message. Editing the surface of what is already there is not a
+  rewrite.
+
 ## Credentials
 
 `fastfields.github.io` publishes its own site root, so the workflow's default
@@ -82,9 +100,28 @@ zensical passes an absolute URL through verbatim, so the browser fetches it at
 page load. Nothing is fetched at build time, and the theme has one place to
 change.
 
-Its link icons match on the URL **path suffix** (`[href$="/lib/"]`), not on a
-full absolute URL. A cross-section link is absolute while a link inside a
-section is relative, and a path suffix matches both.
+Its link icons are bound in **two scopes**, because a nav href and a prose
+href are not the same kind of thing.
+
+- **The menu is bound by position**, not by href:
+  `.md-nav--primary > .md-nav__list > .md-nav__item:nth-child(3)`. An href is
+  not a stable thing to match there. zensical passes a cross-section target
+  through verbatim but rewrites an in-section one relative to the page being
+  rendered — `../numpy/`, `./..`, `../../..`, `././` and the empty string all
+  occur — and a nav group whose first child is not an `index.md` is rendered
+  as a `<label class="md-nav__link">` with no href at all, which is how
+  `fastfields.numpy`, `.torch` and `.cupy` appear on `/python/`. No href
+  selector reaches those. Position is the one property of a top-level entry
+  that is identical in all four sections, and it is the property the nav check
+  already enforces. The rule carries a `:has()` interlock matching only a top
+  level of **exactly eight** items, so a section whose menu has drifted shows
+  no icons at all rather than the right icons on the wrong entries.
+- **Links in body text are bound on the URL path suffix**, scoped to
+  `.md-content`, and only ever on a full absolute path
+  (`[href$="/python/numpy/"]`, never `[href$="numpy/"]` — that would match
+  prose links to any `numpy/` page). Cross-section links in prose are absolute
+  by convention, which is what makes this work; a relative in-section link in
+  prose gets no icon.
 
 **The theme block is duplicated, because zensical has no include mechanism.**
 Keep these identical in all four `zensical.toml` files:
@@ -111,9 +148,9 @@ repo = "fontawesome/brands/github"
 
 ## Nav
 
-**Every section declares the same nine top-level entries, these labels, this
-order, and nothing else at the top level.** One entry per fastfields namespace,
-plus `Home` and the wheel index:
+**Every section declares the same eight top-level entries, these labels, this
+order, and nothing else at the top level.** One entry per *installable*
+fastfields namespace, plus `Home` and the wheel index:
 
 ```
 Home
@@ -121,7 +158,6 @@ fastfields.auto
 fastfields.numpy
 fastfields.torch
 fastfields.cupy
-fastfields.helpers
 fastfields.dlpack
 libfastfields
 Wheel index
@@ -131,15 +167,21 @@ That is the canonical menu. It is what makes the four sections read as one
 site instead of four, and it is checked — see [Keeping the nav
 honest](#keeping-the-nav-honest) below.
 
+**`fastfields.helpers` is not one of the eight.** It is a shared-arguments
+module that ships inside the base distribution; nobody installs or imports it
+to use fastfields, so it is not a listed namespace. Its pages stay built and
+published — `/python/helpers/` and `/python/api/helpers/` — nested under
+`fastfields.auto`, which is where the base distribution's own material sits.
+
 The namespace order is the order of the **Packages table on the landing page**.
 Keep the two consistent; if they ever disagree, they are both wrong until
 someone decides which.
 
 ### The rules
 
-- **A section may expand any of the nine into a nested list of its own pages.**
-  That is the point of a shared top level — it stays recognisable while each
-  section fills in what it actually documents. From `/python/`:
+- **A section may expand any of the eight into a nested list of its own
+  pages.** That is the point of a shared top level — it stays recognisable
+  while each section fills in what it actually documents. From `/python/`:
 
   ```toml
   {"fastfields.numpy" = [
@@ -153,10 +195,11 @@ someone decides which.
 
 - **No section may add, remove, reorder or relabel a top-level entry.** A page
   that is not a namespace — `/python/`'s `monorepo.md`, `/lib/`'s
-  `architecture.md` and `api.md`, everything under `/lib/legacy/` — **nests
-  under one of the nine**. It does not sit beside them. A section with no
-  obvious parent for a page should ask which namespace owns it, because the
-  answer is usually clear and the alternative is drift.
+  `architecture.md` and `api.md`, `/python/`'s two `fastfields.helpers` pages,
+  everything under `/lib/legacy/` — **nests under one of the eight**. It does
+  not sit beside them. A section with no obvious parent for a page should ask
+  which namespace owns it, because the answer is usually clear and the
+  alternative is drift.
 
 - **A target on the current site is a relative path; a target on another
   section is the absolute `https://fastfields.github.io/…` URL.** This is what
@@ -187,7 +230,7 @@ someone decides which.
 ### Keeping the nav honest
 
 `tools/check-docs-nav.py` parses a `zensical.toml`, extracts the top-level nav
-labels in order, and fails if they are not exactly the nine above (it also
+labels in order, and fails if they are not exactly the eight above (it also
 checks `site_name`). It is **identical in all four publisher repos and each one
 runs it against its own config**, from the `nav` job in that repo's
 `docs.yaml`, on every push *and every pull request*. A check living in only one
@@ -199,9 +242,10 @@ guard that has quietly stopped failing on anything cannot pass for a working
 one. CI runs it before the real check.
 
 Changing the canonical menu therefore means changing `CANONICAL_NAV` in four
-copies of the script, this document, and four `zensical.toml` files — on
-purpose. The menu is a cross-repository contract and it should cost something
-to move.
+copies of the script, this document, four `zensical.toml` files, and the
+positional icon bindings in `fastfields.github.io`'s
+`docs/stylesheets/extra.css` — on purpose. The menu is a cross-repository
+contract and it should cost something to move.
 
 ## Adding a section
 
