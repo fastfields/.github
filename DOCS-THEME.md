@@ -111,32 +111,109 @@ repo = "fontawesome/brands/github"
 
 ## Nav
 
-Every section's `nav` carries absolute links to the other three plus the wheel
-index, so the four navigate as one site. Its own pages stay relative. For
-example, from `/lib/`:
+**Every section declares the same nine top-level entries, these labels, this
+order, and nothing else at the top level.** One entry per fastfields namespace,
+plus `Home` and the wheel index:
 
-```toml
-nav = [
-  {"fastfields home" = "https://fastfields.github.io/"},
-  {"Home" = "index.md"},
-  {"Architecture" = "architecture.md"},
-  {"API families" = "api.md"},
-  {"Python packages" = "https://fastfields.github.io/python/"},
-  {"Raw DLPack binding" = "https://fastfields.github.io/dlpack/"},
-  {"Wheel index" = "https://fastfields.github.io/whl/"},
-]
+```
+Home
+fastfields.auto
+fastfields.numpy
+fastfields.torch
+fastfields.cupy
+fastfields.helpers
+fastfields.dlpack
+libfastfields
+Wheel index
 ```
 
-`site_url` must match where the section is actually served
-(`https://fastfields.github.io/lib/`, not `/fastfields-lib/`) or the canonical
-links and sitemap point at pages that do not exist.
+That is the canonical menu. It is what makes the four sections read as one
+site instead of four, and it is checked — see [Keeping the nav
+honest](#keeping-the-nav-honest) below.
+
+The namespace order is the order of the **Packages table on the landing page**.
+Keep the two consistent; if they ever disagree, they are both wrong until
+someone decides which.
+
+### The rules
+
+- **A section may expand any of the nine into a nested list of its own pages.**
+  That is the point of a shared top level — it stays recognisable while each
+  section fills in what it actually documents. From `/python/`:
+
+  ```toml
+  {"fastfields.numpy" = [
+    {"Overview" = "numpy.md"},
+    {"API reference" = "api/numpy.md"},
+  ]},
+  ```
+
+  The nested labels are the section's own business. Only the top level is
+  fixed.
+
+- **No section may add, remove, reorder or relabel a top-level entry.** A page
+  that is not a namespace — `/python/`'s `monorepo.md`, `/lib/`'s
+  `architecture.md` and `api.md`, everything under `/lib/legacy/` — **nests
+  under one of the nine**. It does not sit beside them. A section with no
+  obvious parent for a page should ask which namespace owns it, because the
+  answer is usually clear and the alternative is drift.
+
+- **A target on the current site is a relative path; a target on another
+  section is the absolute `https://fastfields.github.io/…` URL.** This is what
+  lets one menu render identically everywhere while keeping in-site navigation
+  native: a relative link gets the correct active-page highlight and no full
+  page reload, and zensical passes an absolute URL through verbatim. So `Home`
+  is `index.md` on the root and `https://fastfields.github.io/` everywhere
+  else, and each section spells its own namespace entries relatively and the
+  rest absolutely.
+
+- **There is no separate "fastfields home" entry.** `Home` is entry one and
+  does that job.
+
+### `site_name` and `site_url`
+
+- **`site_name` is `"fastfields"` in every config**, including
+  `fastfields-lib`'s. Every section documents one product, and the header is
+  not the place to say which part of it you are in — each page's own `#`
+  heading does that. (`fastfields-lib` set `"fastfields-lib"` here for a while,
+  which made the header read as a different product on a third of the site.)
+- **`repo_url` / `repo_name` stay pointed at each section's own repository.**
+  The header's GitHub link should go to the code being documented, so these are
+  deliberately *not* unified.
+- **`site_url` must match where the section is actually served**
+  (`https://fastfields.github.io/lib/`, not `/fastfields-lib/`) or the
+  canonical links and the sitemap point at pages that do not exist.
+
+### Keeping the nav honest
+
+`tools/check-docs-nav.py` parses a `zensical.toml`, extracts the top-level nav
+labels in order, and fails if they are not exactly the nine above (it also
+checks `site_name`). It is **identical in all four publisher repos and each one
+runs it against its own config**, from the `nav` job in that repo's
+`docs.yaml`, on every push *and every pull request*. A check living in only one
+repository cannot see another repository's drift, which is precisely how four
+different menus came to exist.
+
+`--selftest` checks the checker against known-good and known-broken navs, so a
+guard that has quietly stopped failing on anything cannot pass for a working
+one. CI runs it before the real check.
+
+Changing the canonical menu therefore means changing `CANONICAL_NAV` in four
+copies of the script, this document, and four `zensical.toml` files — on
+purpose. The menu is a cross-repository contract and it should cost something
+to move.
 
 ## Adding a section
 
 1. Give it a `zensical.toml` with the theme block above, the shared
-   `extra_css`, the cross-section nav, and a `site_url` matching its path.
-2. Copy `tools/publish-docs.sh` from any existing publisher, unchanged.
-3. Add a `docs.yaml` that builds and then runs
+   `extra_css`, `site_name = "fastfields"`, the canonical nav, and a `site_url`
+   matching its path.
+2. Copy `tools/publish-docs.sh` and `tools/check-docs-nav.py` from any existing
+   publisher, both unchanged.
+3. Add a `docs.yaml` with a `nav` job that runs
+   `tools/check-docs-nav.py --selftest` and then
+   `tools/check-docs-nav.py --check zensical.toml` (on pushes *and* pull
+   requests), and a `build-deploy` job that `needs: nav`, builds, and runs
    `./tools/publish-docs.sh --subdir <name> --site site`.
 4. Make sure the `DOCS_DEPLOY_KEY` organization secret is scoped to it, and
    invoke the script with `--auth ssh`. The default `GITHUB_TOKEN` cannot be
