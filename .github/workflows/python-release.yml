@@ -118,18 +118,21 @@ on:
           CIBW_REPAIR_WHEEL_COMMAND_LINUX below.
         type: string
         default: '["ubuntu-latest"]'
-      cibw-python-selectors:
+      cibw-build-python:
         description: >-
-          JSON array of bare Python-interpreter tags, one per `build-compiled`
-          matrix job -- each job builds only that interpreter's wheel
-          (CIBW_BUILD: "<tag>-*"). No wildcard here: the value also names the
-          job's upload-artifact, and GitHub Actions artifact names reject "*".
-          Keeping these as separate jobs -- rather than one CIBW_BUILD string
-          covering all of them -- is what lets each job `needs: build-native`
-          and download the once-per-OS native library instead of rebuilding
-          it.
+          The single CPython cibuildwheel builds on, as a bare interpreter tag
+          (CIBW_BUILD: "<tag>-*"). One value, not a list: fastfields-dlpack's
+          extension is built in nanobind's split mode, which compiles against
+          Python's limited API and emits one `<tag>-abi3-<plat>` wheel that
+          every CPython from that tag up can install. So the Python axis is
+          gone from `build-compiled` -- the matrix is one job per (OS,
+          backend) -- and this names the floor, which must equal the
+          Py_LIMITED_API version setup.py compiles against (cp310: nanobind's
+          limited-API floor, see its split-mode note). Building on a *newer*
+          CPython would still produce a wheel tagged for that newer one, so
+          this is the floor and not merely "some 3.x".
         type: string
-        default: '["cp39", "cp310", "cp311", "cp312"]'
+        default: cp310
       manylinux-image:
         description: >-
           manylinux image family for a compiled Linux build (passed to both
@@ -256,17 +259,23 @@ jobs:
   # cibuildwheel drives setup.py, which links the nanobind extension against
   # the native libs `build-native` already built (via FASTFIELDS_PREBUILT_LIB
   # -- setup.py copies them in and skips its own `make` step) and ships them
-  # inside the wheel. One job per (os, python-selector) so each downloads the
-  # native-lib artifact independently and the matrix is fully parallel.
+  # inside the wheel.
+  #
+  # One job per (OS, backend), and that is the whole matrix: the extension is
+  # built in nanobind's split mode against Python's limited API, so a single
+  # `cp310-abi3` wheel is installable on every CPython >= 3.10 and there is
+  # nothing to repeat per interpreter. This used to be one job per (OS,
+  # python-selector) -- four Linux jobs producing four nearly identical
+  # wheels. The shape now matches `build-native`'s, which never had a Python
+  # axis because the native library has no Python ABI at all.
   build-compiled:
     if: ${{ inputs.compiled }}
-    name: build (${{ inputs.backend }}, ${{ matrix.os }}, ${{ matrix.python }})
+    name: build (${{ inputs.backend }}, ${{ matrix.os }})
     needs: build-native
     strategy:
       fail-fast: false
       matrix:
         os: ${{ fromJSON(inputs.runners) }}
-        python: ${{ fromJSON(inputs.cibw-python-selectors) }}
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v5
@@ -285,7 +294,11 @@ jobs:
           path: prebuilt-native-lib
       - uses: pypa/cibuildwheel@v2.21
         env:
-          CIBW_BUILD: ${{ matrix.python }}-*
+          # One interpreter, and the wheel it emits is not that interpreter's:
+          # setup.py sets bdist_wheel's py_limited_api, so the output is
+          # `<tag>-abi3-<plat>`. Selecting more than one CPython here would
+          # just rebuild the same abi3 wheel and overwrite it.
+          CIBW_BUILD: ${{ inputs.cibw-build-python }}-*
           CIBW_SKIP: "*-musllinux_* *_i686 *-win32"
           # AlmaLinux 8 rather than cibuildwheel's default CentOS 7 image: its
           # system libstdc++ headers are GCC 8, which clang picks up without
@@ -356,10 +369,12 @@ jobs:
             -w {dest_dir} {wheel}
       - uses: actions/upload-artifact@v4
         with:
-          # matrix.python included: this job now runs once per (os, python
-          # selector) instead of once per os, so the name must stay unique
-          # per job or upload-artifact rejects the collision.
-          name: dist-${{ inputs.backend }}-${{ matrix.os }}-${{ matrix.python }}
+          # One job per (backend, os) again, so (backend, os) is once more a
+          # unique artifact name. While the Python axis existed this also
+          # carried the matrix.python value; upload-artifact rejects a
+          # collision, so a stale suffix would be an error rather than a
+          # silent overwrite.
+          name: dist-${{ inputs.backend }}-${{ matrix.os }}
           path: wheelhouse/*.whl
 
   # -------------------------------------------------------------- publish
