@@ -38,9 +38,12 @@ name: Test
 #
 #     Observed on run 42051085520: `pytest (ubuntu-latest, 3.9)` fails at step
 #     3 in under two seconds while the other five legs pass with `76 passed`.
-#     `requires-python = ">=3.9"` across the distributions, so the answer is to
-#     pin that leg to an image that has 3.9, not to drop it: it is
-#     `ubuntu-22.04` below.
+#     The answer at the time was to pin that leg to an image that has 3.9
+#     rather than drop it, because `requires-python` was ">=3.9" everywhere.
+#     The floor has since moved to 3.10 (fastfields-dlpack's abi3 wheel; see
+#     DEFAULT below), so there is no 3.9 leg left -- but the failure mode this
+#     describes is about the cross product, not about 3.9, and is exactly what
+#     the `plan` job still guards.
 #   * `macos-latest` is arm64 (macOS 26 Arm64 today), and the only darwin 3.9
 #     builds for arm64 are 3.9.12/3.9.13 -- two years of patches behind the
 #     3.9.25 that x64 gets. The x64 macOS labels are `macos-26-intel` /
@@ -189,16 +192,26 @@ jobs:
               "/main/versions-manifest.json"
           )
 
-          # The default matrix: four distinct Ubuntu images, five Pythons,
-          # every pair published by actions/python-versions. `requires-python
-          # = ">=3.9"` across the distributions, so 3.9 has to stay covered --
-          # on an image that actually has it.
+          # The default matrix: four distinct Ubuntu images, four Pythons,
+          # every pair published by actions/python-versions.
+          #
+          # The floor is 3.10, not 3.9, and the reason is compiled: every
+          # caller of this workflow installs `fastfields-dlpack` (that is what
+          # `needs-dlpack` defaults to true for), and fastfields-dlpack is now
+          # `requires-python = ">=3.10"`. Its extension is built in nanobind's
+          # split mode -- one `cp310-abi3` wheel for every CPython -- and
+          # nanobind's limited API cannot go below 3.10 (nb_defs.h #errors).
+          # So a 3.9 leg could not install the package under test at all: it
+          # would fail in pip's resolver, not in a test.
+          #
+          # A `needs-dlpack: false` caller compiles nothing and may legitimately
+          # still support 3.9; it gets a 3.9 leg by passing `matrix-include`,
+          # which is checked like any other. There is no such caller today.
           DEFAULT = [
-              # The declared floor. 22.04 and 24.04 are the only images with a
-              # current 3.9 (3.9.25); 22.04 is the older of the two, so this
-              # leg also covers the oldest toolchain the project claims.
-              {"os": "ubuntu-22.04", "python": "3.9"},
-              {"os": "ubuntu-24.04", "python": "3.10"},
+              # The declared floor, on the oldest image that publishes it, so
+              # this leg also covers the oldest toolchain the project claims.
+              # (3.10 is published for 22.04, 24.04 and 26.04 alike.)
+              {"os": "ubuntu-22.04", "python": "3.10"},
               {"os": "ubuntu-24.04", "python": "3.11"},
               {"os": "ubuntu-26.04", "python": "3.12"},
               # Canary for the `-latest` migration: 3.13 is published for
