@@ -370,9 +370,10 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           # One job per (backend, os) again, so (backend, os) is once more a
-          # unique artifact name. It was `...-${{ matrix.python }}` while the
-          # Python axis existed; upload-artifact rejects a collision, so a
-          # stale suffix here would be an error rather than a silent overwrite.
+          # unique artifact name. While the Python axis existed this also
+          # carried the matrix.python value; upload-artifact rejects a
+          # collision, so a stale suffix would be an error rather than a
+          # silent overwrite.
           name: dist-${{ inputs.backend }}-${{ matrix.os }}
           path: wheelhouse/*.whl
 
