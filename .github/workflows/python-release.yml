@@ -38,6 +38,19 @@ name: Release
 # an already-published release without deleting and re-cutting it.
 #
 # ---------------------------------------------------------------------------
+# Dry runs: `publish: false`
+# ---------------------------------------------------------------------------
+# With `publish: false` every build job runs exactly as it would for a release
+# -- same native-library build, same cibuildwheel invocation, same repair
+# command -- and the wheels are left as workflow artifacts (`dist-*`). The
+# `publish` job, and with it the version assertion, the release upload and the
+# index ping, does not run, so `tag` may then be any ref (a PR head SHA). That
+# is how a package repo proves on a pull request that its wheels still build
+# on every platform, without a tag or a release. The caller must still grant
+# `contents: write`: GitHub checks a called workflow's job permissions
+# statically, skipped job or not, and `publish` declares it.
+#
+# ---------------------------------------------------------------------------
 # Versioning
 # ---------------------------------------------------------------------------
 # All five packages use `versioningit`, which derives the version from
@@ -110,14 +123,38 @@ on:
         default: cpu
       runners:
         description: >-
-          JSON array of runner OSes for a compiled build. Defaults to Linux
-          only: the C++ Makefiles are not yet Windows-portable
-          (fastfields-dlpack#8), and the macOS leg needs cross-arch work before
-          it can be trusted. Widening this ALSO requires a repair command for
-          the new platform -- see the note on
-          CIBW_REPAIR_WHEEL_COMMAND_LINUX below.
+          JSON array of runner labels for a compiled build, one wheel each.
+          Linux (x86_64, in the manylinux container), macOS and Windows (x64)
+          are all wired. On macOS the wheel's architecture is the RUNNER's:
+          nothing here cross-compiles, so an arm64 wheel needs an arm64 runner
+          (macos-14 and later, macos-latest) and an x86_64 one an Intel runner
+          (macos-15-intel). Both build-native and build-compiled derive the
+          arch from the runner with `uname -m`, pass it to the C++ build as
+          ARCHFLAGS and to cibuildwheel as CIBW_ARCHS_MACOS, and fail if
+          either the native libraries or the repaired wheel are for any other
+          architecture -- so a mislabelled wheel cannot be produced.
+          Defaults to Linux only, so that widening it is the caller's
+          decision.
         type: string
         default: '["ubuntu-latest"]'
+      macos-deployment-target:
+        description: >-
+          MACOSX_DEPLOYMENT_TARGET for macOS wheels: the minimum macOS the
+          wheel's binaries load on, and the version in its platform tag
+          (macosx_11_0_arm64). Exported to BOTH the native-library build and
+          cibuildwheel -- they have to agree, or delocate rejects a library
+          built for a newer macOS than the tag claims. 11.0 is the first
+          release with arm64, and a floor the C++17 extension (std::optional
+          et al.) is comfortably above on x86_64 too.
+        type: string
+        default: "11.0"
+      publish:
+        description: >-
+          False for a dry run: build every wheel and upload them as workflow
+          artifacts only -- no version assertion, no release upload, no index
+          ping, and `tag` may be any ref. See "Dry runs" at the top.
+        type: boolean
+        default: true
       cibw-build-python:
         description: >-
           The single CPython cibuildwheel builds on, as a bare interpreter tag
@@ -185,9 +222,11 @@ jobs:
   # (`inputs.manylinux-image`), not on the bare runner: the runner's glibc is
   # newer than what the manylinux tag promises, and building there instead
   # would silently bake incompatible symbol versions into a "manylinux" wheel.
-  # macOS (once `runners` is widened past Linux, fastfields-dlpack#8) has no
-  # such container -- cibuildwheel builds directly on the host there too --
-  # so that leg builds directly on the runner to match.
+  # macOS and Windows have no such container -- cibuildwheel builds directly
+  # on the host there too -- so those legs build directly on the runner to
+  # match: macOS for the runner's own architecture at
+  # `inputs.macos-deployment-target`, Windows with LLVM's clang++ against the
+  # MSVC runtime (fastfields-lib's make/common.mk documents both).
   #
   # STATUS: only the `cpu` backend is wired (mirrors release.yaml's current
   # scope). Extending to a CUDA backend needs an nvcc-capable runner/image and
@@ -201,6 +240,11 @@ jobs:
       matrix:
         os: ${{ fromJSON(inputs.runners) }}
     runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    env:
+      MACOSX_DEPLOYMENT_TARGET: ${{ inputs.macos-deployment-target }}
     steps:
       - uses: actions/checkout@v5
         with:
@@ -208,6 +252,24 @@ jobs:
           # No submodules: fastfields-dlpack#34 made _fastfields_lib a SHA in
           # `fastfields-lib.sha` that setup.py clones at build time.
           fetch-depth: 0            # versioningit needs the tag
+      # The C++ tree is fetched by setup.py at wheel-build time, but this job
+      # builds it *before* any setup.py runs -- so it fetches the same pinned
+      # SHA itself, the same init/fetch/checkout way setup.py does (a commit
+      # id cannot be cloned with --branch). The tree lands in
+      # `_fastfields_lib/`, where setup.py would put it and where the
+      # build-compiled job's setup.py will find (and reuse) the headers.
+      - name: Fetch the pinned fastfields-lib tree
+        run: |
+          set -euo pipefail
+          if [ -d _fastfields_lib/include ]; then
+            echo "_fastfields_lib already present"; exit 0
+          fi
+          sha=$(grep -v '^[[:space:]]*#' fastfields-lib.sha | tr -d '[:space:]')
+          echo "pinned fastfields-lib: $sha"
+          git init -q _fastfields_lib
+          git -C _fastfields_lib remote add origin https://github.com/fastfields/fastfields-lib.git
+          git -C _fastfields_lib fetch -q --depth 1 origin "$sha"
+          git -C _fastfields_lib checkout -q --detach FETCH_HEAD
       - name: Build libfastfields + libfastfields-cpu (manylinux container)
         if: runner.os == 'Linux'
         # `:latest` rather than pinning the exact tag cibuildwheel resolves
@@ -239,9 +301,45 @@ jobs:
               git config --global --add safe.directory "*"
               make -C _fastfields_lib CXX=clang++
             '
+      # Choco's native GNU make, not MSYS's: its $(abspath) yields the
+      # drive-letter paths clang++ and the .d dependency files use. LLVM's
+      # clang++ is preinstalled on the Windows images; it targets
+      # x86_64-pc-windows-msvc, the runtime CPython is built against.
+      - name: Ensure GNU make (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          command -v make >/dev/null 2>&1 || choco install make -y --no-progress
+          make --version | head -1
+          clang++ --version
+      # ARCHFLAGS is what fastfields-lib's Makefile reads on macOS (it is also
+      # the variable cibuildwheel exports): the runner's own arch, explicitly,
+      # so the libraries' architecture is a stated fact and not a compiler
+      # default -- checked right after with lipo.
       - name: Build libfastfields + libfastfields-cpu (host toolchain)
         if: runner.os != 'Linux'
-        run: make -C _fastfields_lib CXX=clang++
+        run: |
+          set -euo pipefail
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            export ARCHFLAGS="-arch $(uname -m)"
+            echo "ARCHFLAGS=$ARCHFLAGS MACOSX_DEPLOYMENT_TARGET=$MACOSX_DEPLOYMENT_TARGET"
+          fi
+          make -C _fastfields_lib CXX=clang++
+      - name: Check the native libraries' architecture (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          set -euo pipefail
+          want=$(uname -m)
+          for lib in _fastfields_lib/build/libfastfields.dylib \
+                     _fastfields_lib/build/lib/libfastfields-cpu.dylib; do
+            got=$(lipo -archs "$lib")
+            echo "$lib: $got (minos $(otool -l "$lib" | awk '/minos/{print $2; exit}'))"
+            if [ "$got" != "$want" ]; then
+              echo "::error::$lib is built for '$got', not the runner's '$want'"
+              exit 1
+            fi
+          done
+      # Flat, and on Windows including the import libraries (`*.lib`) the
+      # extension links against -- a PE/COFF linker cannot link a .dll.
       - name: Stage the built libs flat for upload
         run: |
           set -euo pipefail
@@ -277,6 +375,14 @@ jobs:
       matrix:
         os: ${{ fromJSON(inputs.runners) }}
     runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    env:
+      # Read by cibuildwheel itself (it sets the wheel's platform tag from
+      # it) and inherited by the extension's compile; must equal the value
+      # build-native used, which is the same input.
+      MACOSX_DEPLOYMENT_TARGET: ${{ inputs.macos-deployment-target }}
     steps:
       - uses: actions/checkout@v5
         with:
@@ -284,6 +390,11 @@ jobs:
           # No submodules: fastfields-dlpack#34 made _fastfields_lib a SHA in
           # `fastfields-lib.sha` that setup.py clones at build time.
           fetch-depth: 0            # versioningit needs the tag
+      # The runner's own architecture is the only one built on macOS: see
+      # the `runners` input. Spelled out so cibuildwheel cannot pick another.
+      - name: Target architecture (macOS)
+        if: runner.os == 'macOS'
+        run: echo "CIBW_ARCHS_MACOS=$(uname -m)" >> "$GITHUB_ENV"
       # Downloaded to a fixed path under the checkout root so it lands inside
       # cibuildwheel's /project mount; FASTFIELDS_PREBUILT_LIB below points
       # setup.py at it. build-native staged the two libs flat (no
@@ -300,6 +411,8 @@ jobs:
           # just rebuild the same abi3 wheel and overwrite it.
           CIBW_BUILD: ${{ inputs.cibw-build-python }}-*
           CIBW_SKIP: "*-musllinux_* *_i686 *-win32"
+          # x64 only: fastfields-lib has not been built for Windows on ARM.
+          CIBW_ARCHS_WINDOWS: AMD64
           # AlmaLinux 8 rather than cibuildwheel's default CentOS 7 image: its
           # system libstdc++ headers are GCC 8, which clang picks up without
           # any --gcc-toolchain steering. (CentOS 7's are GCC 4.8, whose
@@ -319,13 +432,19 @@ jobs:
           # relative to the checkout root), so it copies them in and skips its
           # own `make` invocation entirely. Platform-specific because the path
           # cibuildwheel sees it at differs: /project is where the Linux
-          # (manylinux container) build mounts the checkout. A future macOS
-          # leg builds directly on the runner (no container), so it would need
-          # CIBW_ENVIRONMENT_MACOS with the checkout's real host path instead
-          # -- not wired here since macOS isn't in `runners` yet.
+          # (manylinux container) build mounts the checkout. macOS and Windows
+          # build directly on the runner, so they pass the path RELATIVE to
+          # the project root, which setup.py resolves against its own
+          # directory -- no host path (and no Windows backslashes) to quote.
           CIBW_ENVIRONMENT_LINUX: >-
             CXX=clang++ FF_WHEEL_VARIANT=${{ inputs.backend }}
             FASTFIELDS_PREBUILT_LIB=/project/prebuilt-native-lib
+          CIBW_ENVIRONMENT_MACOS: >-
+            CXX=clang++ FF_WHEEL_VARIANT=${{ inputs.backend }}
+            FASTFIELDS_PREBUILT_LIB=prebuilt-native-lib
+          CIBW_ENVIRONMENT_WINDOWS: >-
+            CXX=clang++ FF_WHEEL_VARIANT=${{ inputs.backend }}
+            FASTFIELDS_PREBUILT_LIB=prebuilt-native-lib
           # `clang` for the C++ build -- and `gcc-c++` alongside it, which is
           # NOT redundant: clang is only the compiler driver, it uses the
           # system GCC's libstdc++ headers. Without gcc-c++ the manylinux image
@@ -347,26 +466,34 @@ jobs:
           # own libfastfields* alone: the package already carries an
           # $ORIGIN/lib rpath and ships them itself.
           #
-          # NOTE for whoever widens `runners` past Linux: the exclusion above
-          # is the whole point of overriding this, and it does NOT carry over
-          # to the other platforms. cibuildwheel would fall back to its stock
-          # macOS (delocate) and Windows (delvewheel) repair, neither of which
-          # knows that libfastfields{,-cpu,-cuda} are ours and already shipped
-          # inside the wheel -- so they would be re-vendored, and on Windows
-          # name-mangled, breaking the loader path fastfields/dlpack/__init__.py
-          # sets up with os.add_dll_directory. Adding a macOS/Windows leg means
-          # adding the matching CIBW_REPAIR_WHEEL_COMMAND_{MACOS,WINDOWS} with
-          # the same excludes (`delocate-wheel --exclude libfastfields ...`,
-          # `delvewheel repair --exclude ... `) and checking the flag spelling
-          # against the tool versions cibuildwheel actually pins -- they are
-          # deliberately not pre-wired here, because an untested repair command
-          # for a leg that cannot run yet is worse than none.
           CIBW_REPAIR_WHEEL_COMMAND_LINUX: >-
             auditwheel repair
             --exclude libfastfields.so
             --exclude libfastfields-cpu.so
             --exclude libfastfields-cuda.so
             -w {dest_dir} {wheel}
+          # macOS: delocate, as cibuildwheel would run it by default, stated
+          # here because `--require-archs` is the half that matters -- it
+          # fails the repair if any binary in the wheel (the extension AND the
+          # two shipped dylibs) lacks the wheel's architecture, which is the
+          # mislabelled-wheel guard. Unlike auditwheel it needs no excludes:
+          # delocate only copies in libraries from OUTSIDE the wheel, and
+          # libfastfields{,-cpu}.dylib are already inside it, reached through
+          # the extension's @loader_path/lib rpath and their own @rpath
+          # install names (fastfields-lib's make/common.mk). It also rejects a
+          # dylib whose minimum macOS is newer than the platform tag.
+          CIBW_REPAIR_WHEEL_COMMAND_MACOS: >-
+            delocate-wheel --require-archs {delocate_archs}
+            -w {dest_dir} -v {wheel}
+          # Windows: no repair, which is also cibuildwheel's default.
+          # delvewheel would vendor (and name-mangle) libfastfields*.dll,
+          # which the wheel already ships under fastfields/dlpack/lib/ and
+          # fastfields/dlpack/__init__.py puts on the DLL search path with
+          # os.add_dll_directory; and it would want a top-level __init__.py
+          # that `fastfields`, a PEP 420 namespace, must never have. What the
+          # wheel then relies on from the system is the MSVC C++ runtime
+          # (msvcp140.dll), as most C++ extension wheels do.
+          CIBW_REPAIR_WHEEL_COMMAND_WINDOWS: ""
       - uses: actions/upload-artifact@v4
         with:
           # One job per (backend, os) again, so (backend, os) is once more a
@@ -376,6 +503,7 @@ jobs:
           # silent overwrite.
           name: dist-${{ inputs.backend }}-${{ matrix.os }}
           path: wheelhouse/*.whl
+          if-no-files-found: error
 
   # -------------------------------------------------------------- publish
   publish:
@@ -384,7 +512,8 @@ jobs:
     # Exactly one of {build-pure, build-compiled} runs (build-native only
     # alongside build-compiled); `needs` on a skipped job resolves to
     # 'skipped', so gate on "nothing actually failed" rather than success().
-    if: ${{ always() && !failure() && !cancelled() }}
+    # Never on a dry run (`publish: false`).
+    if: ${{ inputs.publish && always() && !failure() && !cancelled() }}
     runs-on: ubuntu-latest
     steps:
       # `pattern: dist-*` matters here: without it this would also sweep up
