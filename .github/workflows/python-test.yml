@@ -499,13 +499,17 @@ jobs:
         run: clang++ --version
       - name: Install build toolchain (Windows)
         if: ${{ inputs.needs-dlpack && runner.os == 'Windows' }}
-        # NOTE: the C++ Makefiles (cpu-lib/lib/bind-py/fastfields-dlpack) were
-        # made Windows-portable -- clang-style flags with no -fPIC/-soname
-        # issues, and the recipes run under git bash. This should work, but
-        # there's no live/verified green Windows CI run yet, so it may still
-        # need iteration on a first real run. Kept visible (not hidden) so
-        # this stays tracked either way.
-        run: choco install -y llvm make
+        # LLVM's clang++ is preinstalled on the Windows images (it targets
+        # x86_64-pc-windows-msvc, the runtime CPython uses); reinstalling it
+        # through choco only cost minutes and moved the compiler version under
+        # the build. GNU make is not preinstalled, and fastfields-dlpack's
+        # setup.py runs fastfields-lib's Makefile -- choco's native make, whose
+        # drive-letter paths are what that Makefile's Windows block expects.
+        run: |
+          command -v clang++ >/dev/null 2>&1 || choco install -y llvm
+          command -v make >/dev/null 2>&1 || choco install -y make --no-progress
+          clang++ --version
+          make --version | head -1
       # Dogfood our own wheel index (fastfields#6). Installing from the index
       # is the path we tell users to use, so CI should be the first thing to
       # notice when it breaks -- and it is the only coverage the index will
@@ -549,5 +553,10 @@ jobs:
           pip install "fastfields-dlpack @ git+https://github.com/fastfields/fastfields-dlpack@main"
       - name: Install package + test deps
         run: pip install ".[test]"
+      # From a neutral directory, so the installed package is what imports.
+      # $RUNNER_TEMP and a quoted $GITHUB_WORKSPACE rather than `/tmp` and an
+      # unquoted `${{ github.workspace }}`: on Windows the latter is
+      # `D:\a\<repo>\<repo>`, which bash reads as escape sequences and
+      # turns into a path that does not exist.
       - name: Run pytest
-        run: cd /tmp && python -m pytest ${{ github.workspace }}/tests -q
+        run: cd "$RUNNER_TEMP" && python -m pytest "$GITHUB_WORKSPACE/tests" -q
