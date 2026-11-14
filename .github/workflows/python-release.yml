@@ -127,7 +127,7 @@ on:
           Linux (x86_64, in the manylinux container), macOS and Windows (x64)
           are all wired. On macOS the wheel's architecture is the RUNNER's:
           nothing here cross-compiles, so an arm64 wheel needs an arm64 runner
-          (macos-15, macos-latest) and an x86_64 one an Intel runner
+          (macos-26, macos-latest) and an x86_64 one an Intel runner
           (macos-15-intel). Both build-native and build-compiled derive the
           arch from the runner with `uname -m`, pass it to the C++ build as
           ARCHFLAGS and to cibuildwheel as CIBW_ARCHS_MACOS, and fail if
