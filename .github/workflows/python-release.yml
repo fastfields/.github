@@ -117,7 +117,7 @@ on:
           generate.py buckets on. Ignored when compiled is false: the
           pure-Python wrappers have no variant axis, and an unlabelled wheel
           is deliberately listed in *every* backend folder. Also selects the
-          `build-native` job's build (currently only "cpu" is wired -- see the
+          native-library build (currently only "cpu" is wired -- see the
           note there).
         type: string
         default: cpu
@@ -128,7 +128,7 @@ on:
           are all wired. On macOS the wheel's architecture is the RUNNER's:
           nothing here cross-compiles, so an arm64 wheel needs an arm64 runner
           (macos-26, macos-latest) and an x86_64 one an Intel runner
-          (macos-15-intel). Both build-native and build-compiled derive the
+          (macos-15-intel). The native build and cibuildwheel both derive the
           arch from the runner with `uname -m`, pass it to the C++ build as
           ARCHFLAGS and to cibuildwheel as CIBW_ARCHS_MACOS, and fail if
           either the native libraries or the repaired wheel are for any other
@@ -173,7 +173,7 @@ on:
       manylinux-image:
         description: >-
           manylinux image family for a compiled Linux build (passed to both
-          CIBW_MANYLINUX_X86_64_IMAGE and the `build-native` job's container,
+          CIBW_MANYLINUX_X86_64_IMAGE and the native-library build's container,
           so the once-per-OS native library is built in the exact same glibc
           environment cibuildwheel itself would use -- building it on the bare
           runner instead would bake in a newer glibc than the manylinux tag
@@ -211,30 +211,41 @@ jobs:
           name: dist-universal
           path: dist/*
 
-  # ------------------------------------------------------------ build-native
-  # The compiled wheel's native libfastfields{,-cpu} does NOT depend on the
-  # Python ABI -- only on OS + backend -- so it is built exactly once per
-  # (OS, backend) here and handed to every `build-compiled` matrix job below
-  # as an artifact, instead of each of them re-running the ~templated `make`
-  # build from scratch (previously 4x per OS, once per cp3x wheel).
+  # --------------------------------------------------------------- compiled
+  # One job per (OS, backend), and that is the whole matrix. Each job builds
+  # the native libfastfields{,-cpu} for its OS, then lets cibuildwheel drive
+  # setup.py, which links the nanobind extension against them (via
+  # FASTFIELDS_PREBUILT_LIB -- setup.py copies them in and skips its own
+  # `make`) and ships them inside the wheel. The extension is built in
+  # nanobind's split mode against Python's limited API, so a single
+  # `cp310-abi3` wheel serves every CPython >= 3.10: nothing repeats per
+  # interpreter.
   #
-  # Built inside the *same* manylinux container cibuildwheel itself uses
-  # (`inputs.manylinux-image`), not on the bare runner: the runner's glibc is
-  # newer than what the manylinux tag promises, and building there instead
-  # would silently bake incompatible symbol versions into a "manylinux" wheel.
-  # macOS and Windows have no such container -- cibuildwheel builds directly
-  # on the host there too -- so those legs build directly on the runner to
-  # match: macOS for the runner's own architecture at
-  # `inputs.macos-deployment-target`, Windows with LLVM's clang++ against the
-  # MSVC runtime (fastfields-lib's make/common.mk documents both).
+  # The native build used to be a separate `build-native` job whose artifact
+  # every leg downloaded. That paid off while there was one wheel per CPython
+  # (built once, served four); with one abi3 wheel per OS it only added a
+  # barrier -- `needs:` waits for EVERY matrix leg, so the slowest platform's
+  # native build (the Intel macOS runner, over two hours) held every other
+  # platform's wheel back. In-job, each OS finishes on its own schedule.
   #
-  # STATUS: only the `cpu` backend is wired (mirrors release.yaml's current
-  # scope). Extending to a CUDA backend needs an nvcc-capable runner/image and
-  # `make USE_CUDA=1`, plus uploading libfastfields-cuda alongside the two
-  # libs below -- not done here since no CUDA wheel is attempted yet.
-  build-native:
+  # Where the native libraries are built:
+  #   * Linux: inside the *same* manylinux container cibuildwheel uses
+  #     (`inputs.manylinux-image`), not on the bare runner, whose glibc is
+  #     newer than the manylinux tag promises.
+  #   * macOS: on the runner, for its own architecture, at
+  #     `inputs.macos-deployment-target` (cibuildwheel builds on the host).
+  #   * Windows: on the runner, LLVM's clang++ against the MSVC DLL runtime.
+  # fastfields-lib's make/common.mk documents the macOS and Windows builds.
+  #
+  # STATUS: only the `cpu` backend is wired. A CUDA backend needs an
+  # nvcc-capable runner/image and `make USE_CUDA=1`, plus staging
+  # libfastfields-cuda beside the two libraries below.
+  build-compiled:
     if: ${{ inputs.compiled }}
-    name: build native (${{ inputs.backend }}, ${{ matrix.os }})
+    name: build (${{ inputs.backend }}, ${{ matrix.os }})
+    # The full-static native build is long on the macOS runners (the Intel
+    # one most of all); well under this, but not the 6 h default.
+    timeout-minutes: 240
     strategy:
       fail-fast: false
       matrix:
@@ -244,6 +255,9 @@ jobs:
       run:
         shell: bash
     env:
+      # Read by cibuildwheel itself (it sets the wheel's platform tag from
+      # it) and inherited by the extension's compile; must equal the value
+      # native build below uses, which is the same input.
       MACOSX_DEPLOYMENT_TARGET: ${{ inputs.macos-deployment-target }}
     steps:
       - uses: actions/checkout@v5
@@ -252,6 +266,11 @@ jobs:
           # No submodules: fastfields-dlpack#34 made _fastfields_lib a SHA in
           # `fastfields-lib.sha` that setup.py clones at build time.
           fetch-depth: 0            # versioningit needs the tag
+      # The runner's own architecture is the only one built on macOS: see
+      # the `runners` input. Spelled out so cibuildwheel cannot pick another.
+      - name: Target architecture (macOS)
+        if: runner.os == 'macOS'
+        run: echo "CIBW_ARCHS_MACOS=$(uname -m)" >> "$GITHUB_ENV"
       # The C++ tree is fetched by setup.py at wheel-build time, but this job
       # builds it *before* any setup.py runs -- so it fetches the same pinned
       # SHA itself, the same init/fetch/checkout way setup.py does (a commit
@@ -346,69 +365,13 @@ jobs:
           done
       # Flat, and on Windows including the import libraries (`*.lib`) the
       # extension links against -- a PE/COFF linker cannot link a .dll.
-      - name: Stage the built libs flat for upload
+      - name: Stage the built libs flat for setup.py
         run: |
           set -euo pipefail
-          mkdir -p native-lib
-          cp _fastfields_lib/build/libfastfields.* native-lib/
-          cp _fastfields_lib/build/lib/libfastfields-cpu.* native-lib/
-          ls -l native-lib
-      - uses: actions/upload-artifact@v4
-        with:
-          name: native-${{ inputs.backend }}-${{ matrix.os }}
-          path: native-lib/*
-          if-no-files-found: error
-
-  # --------------------------------------------------------------- compiled
-  # cibuildwheel drives setup.py, which links the nanobind extension against
-  # the native libs `build-native` already built (via FASTFIELDS_PREBUILT_LIB
-  # -- setup.py copies them in and skips its own `make` step) and ships them
-  # inside the wheel.
-  #
-  # One job per (OS, backend), and that is the whole matrix: the extension is
-  # built in nanobind's split mode against Python's limited API, so a single
-  # `cp310-abi3` wheel is installable on every CPython >= 3.10 and there is
-  # nothing to repeat per interpreter. This used to be one job per (OS,
-  # python-selector) -- four Linux jobs producing four nearly identical
-  # wheels. The shape now matches `build-native`'s, which never had a Python
-  # axis because the native library has no Python ABI at all.
-  build-compiled:
-    if: ${{ inputs.compiled }}
-    name: build (${{ inputs.backend }}, ${{ matrix.os }})
-    needs: build-native
-    strategy:
-      fail-fast: false
-      matrix:
-        os: ${{ fromJSON(inputs.runners) }}
-    runs-on: ${{ matrix.os }}
-    defaults:
-      run:
-        shell: bash
-    env:
-      # Read by cibuildwheel itself (it sets the wheel's platform tag from
-      # it) and inherited by the extension's compile; must equal the value
-      # build-native used, which is the same input.
-      MACOSX_DEPLOYMENT_TARGET: ${{ inputs.macos-deployment-target }}
-    steps:
-      - uses: actions/checkout@v5
-        with:
-          ref: ${{ inputs.tag }}
-          # No submodules: fastfields-dlpack#34 made _fastfields_lib a SHA in
-          # `fastfields-lib.sha` that setup.py clones at build time.
-          fetch-depth: 0            # versioningit needs the tag
-      # The runner's own architecture is the only one built on macOS: see
-      # the `runners` input. Spelled out so cibuildwheel cannot pick another.
-      - name: Target architecture (macOS)
-        if: runner.os == 'macOS'
-        run: echo "CIBW_ARCHS_MACOS=$(uname -m)" >> "$GITHUB_ENV"
-      # Downloaded to a fixed path under the checkout root so it lands inside
-      # cibuildwheel's /project mount; FASTFIELDS_PREBUILT_LIB below points
-      # setup.py at it. build-native staged the two libs flat (no
-      # build/ or build/lib/ nesting), matching what setup.py expects there.
-      - uses: actions/download-artifact@v4
-        with:
-          name: native-${{ inputs.backend }}-${{ matrix.os }}
-          path: prebuilt-native-lib
+          mkdir -p prebuilt-native-lib
+          cp _fastfields_lib/build/libfastfields.* prebuilt-native-lib/
+          cp _fastfields_lib/build/lib/libfastfields-cpu.* prebuilt-native-lib/
+          ls -l prebuilt-native-lib
       - uses: pypa/cibuildwheel@v2.21
         env:
           # One interpreter, and the wheel it emits is not that interpreter's:
@@ -434,7 +397,7 @@ jobs:
           #
           CIBW_ENVIRONMENT: "CXX=clang++ FF_WHEEL_VARIANT=${{ inputs.backend }}"
           # FASTFIELDS_PREBUILT_LIB points setup.py at the native libs
-          # `build-native` already built (download-artifact path above,
+          # the steps above built and staged (prebuilt-native-lib/,
           # relative to the checkout root), so it copies them in and skips its
           # own `make` invocation entirely. Platform-specific because the path
           # cibuildwheel sees it at differs: /project is where the Linux
@@ -514,18 +477,16 @@ jobs:
   # -------------------------------------------------------------- publish
   publish:
     name: publish to the release
-    needs: [build-native, build-pure, build-compiled]
-    # Exactly one of {build-pure, build-compiled} runs (build-native only
-    # alongside build-compiled); `needs` on a skipped job resolves to
+    needs: [build-pure, build-compiled]
+    # Exactly one of {build-pure, build-compiled} runs; `needs` on a skipped job resolves to
     # 'skipped', so gate on "nothing actually failed" rather than success().
     # Never on a dry run (`publish: false`).
     if: ${{ inputs.publish && always() && !failure() && !cancelled() }}
     runs-on: ubuntu-latest
     steps:
-      # `pattern: dist-*` matters here: without it this would also sweep up
-      # the `native-*` artifact (the raw .so files from build-native), which
-      # would then get uploaded onto the release below by `gh release upload
-      # dist/*` alongside the actual wheels/sdist.
+      # `pattern: dist-*`: only the wheel/sdist artifacts are release
+      # assets; anything else uploaded in this run must stay off the
+      # release that `gh release upload dist/*` below writes to.
       - uses: actions/download-artifact@v4
         with:
           path: dist
