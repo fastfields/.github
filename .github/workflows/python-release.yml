@@ -323,7 +323,13 @@ jobs:
             export ARCHFLAGS="-arch $(uname -m)"
             echo "ARCHFLAGS=$ARCHFLAGS MACOSX_DEPLOYMENT_TARGET=$MACOSX_DEPLOYMENT_TARGET"
           fi
-          make -C _fastfields_lib CXX=clang++
+          # Parallel: the hub's link step depends on libfastfields-cpu as a
+          # real prerequisite in today's fastfields-lib (src/lib/Makefile's
+          # CPU_DEP), so the -j race noted on the container step above is
+          # gone; serial, this step was ~40 min on the macOS runners. -j3:
+          # the measured peak is ~1-4 GB per compiler process at -O3, and
+          # the arm64 runner has 7 GB.
+          make -j3 -C _fastfields_lib CXX=clang++
       - name: Check the native libraries' architecture (macOS)
         if: runner.os == 'macOS'
         run: |
